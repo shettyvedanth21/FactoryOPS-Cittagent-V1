@@ -1,11 +1,11 @@
 import { REPORT_SERVICE_BASE } from "./api";
 
 export interface ConsumptionReportParams {
-  tenant_id: string;
-  device_ids: string[];
+  tenant_id?: string;
+  device_id: string;
   start_date: string;
   end_date: string;
-  group_by: "daily" | "weekly";
+  report_name?: string;
 }
 
 export interface ComparisonReportParams {

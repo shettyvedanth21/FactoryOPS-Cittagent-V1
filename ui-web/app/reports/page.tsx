@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { getReportHistory, ReportHistoryItem, getSchedules, deleteSchedule, createSchedule, ScheduleListItem, ScheduleParams } from "@/lib/reportApi";
+import { getReportHistory, ReportHistoryItem, getSchedules, deleteSchedule, createSchedule, ScheduleListItem, ScheduleParams, getReportDownload } from "@/lib/reportApi";
 import { getDevices, Device } from "@/lib/deviceApi";
 
 const DEFAULT_TENANT_ID = "tenant1";
@@ -17,6 +17,7 @@ export default function ReportsPage() {
   const [showModal, setShowModal] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const [formData, setFormData] = useState<{
@@ -105,6 +106,27 @@ export default function ReportsPage() {
     }
   };
 
+  const handleDownload = async (reportId: string) => {
+    try {
+      setDownloadingId(reportId);
+      const blob = await getReportDownload(reportId, DEFAULT_TENANT_ID);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `energy_report_${reportId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      showToast("Download started", "success");
+    } catch (error) {
+      console.error("Failed to download report:", error);
+      showToast("Failed to download report", "error");
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
   const formatDate = (dateStr: string | null): string => {
     if (!dateStr) return "-";
     return new Date(dateStr).toLocaleDateString("en-GB", {
@@ -146,7 +168,7 @@ export default function ReportsPage() {
         <p className="text-gray-600 mt-1">Generate and analyze energy reports</p>
       </div>
 
-      <div className="grid md:grid-cols-2 gap-6">
+      <div className="grid md:grid-cols-1 gap-6">
         <Link
           href="/reports/energy"
           className="block p-6 bg-white border rounded-xl hover:shadow-lg transition-shadow"
@@ -162,24 +184,6 @@ export default function ReportsPage() {
           </p>
           <button className="mt-4 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700">
             Generate Report
-          </button>
-        </Link>
-
-        <Link
-          href="/reports/compare"
-          className="block p-6 bg-white border rounded-xl hover:shadow-lg transition-shadow"
-        >
-          <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center mb-4">
-            <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-            </svg>
-          </div>
-          <h2 className="text-lg font-semibold text-gray-900">Comparative Analysis</h2>
-          <p className="text-sm text-gray-600 mt-1">
-            Machine vs Machine or Period vs Period comparison
-          </p>
-          <button className="mt-4 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700">
-            Compare Now
           </button>
         </Link>
       </div>
@@ -240,8 +244,12 @@ export default function ReportsPage() {
                       </td>
                       <td className="px-6 py-4">
                         {item.status === "completed" && (
-                          <button className="text-blue-600 hover:text-blue-800 text-sm font-medium">
-                            Download
+                          <button
+                            onClick={() => handleDownload(item.report_id)}
+                            disabled={downloadingId === item.report_id}
+                            className="text-blue-600 hover:text-blue-800 text-sm font-medium disabled:text-gray-400"
+                          >
+                            {downloadingId === item.report_id ? "Downloading..." : "Download"}
                           </button>
                         )}
                       </td>

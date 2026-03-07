@@ -1,5 +1,11 @@
+import math
 from datetime import datetime, date
 from typing import Any
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None
 
 
 def clean_for_json(obj: Any) -> Any:
@@ -8,6 +14,12 @@ def clean_for_json(obj: Any) -> Any:
         return obj.isoformat()
     elif isinstance(obj, date):
         return obj.isoformat()
+    elif np is not None and isinstance(obj, np.generic):
+        return clean_for_json(obj.item())
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
     elif isinstance(obj, dict):
         return {k: clean_for_json(v) for k, v in obj.items()}
     elif isinstance(obj, (list, tuple)):

@@ -10,9 +10,9 @@ class DateRangeValidator(BaseModel):
 
 
 class ConsumptionReportRequest(DateRangeValidator):
-    device_ids: list[str]
-    group_by: Literal["daily", "weekly"] = "daily"
-    tenant_id: str
+    device_id: str
+    report_name: str | None = None
+    tenant_id: str = "default"
 
 
 class ComparisonReportRequest(BaseModel):

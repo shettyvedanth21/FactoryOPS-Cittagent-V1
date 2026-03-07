@@ -92,7 +92,7 @@ async def process_schedule(
             )
             return
         
-        await wait_for_report_completion(report_id)
+        await wait_for_report_completion(report_id, tenant_id=tenant_id, max_wait=600)
         
         async with AsyncSessionLocal() as db:
             repo = ReportRepository(db)
@@ -179,13 +179,13 @@ def build_params_from_template(params_template: dict, frequency: str, tenant_id:
     return params
 
 
-async def wait_for_report_completion(report_id: str, max_wait: int = 300) -> None:
+async def wait_for_report_completion(report_id: str, tenant_id: str, max_wait: int = 300) -> None:
     for _ in range(max_wait):
         await asyncio.sleep(2)
         
         async with AsyncSessionLocal() as db:
             repo = ReportRepository(db)
-            report = await repo.get_report(report_id, None)
+            report = await repo.get_report(report_id, tenant_id)
             
             if report and report.status in ["completed", "failed"]:
                 return

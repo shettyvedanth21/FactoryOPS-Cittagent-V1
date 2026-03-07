@@ -38,6 +38,12 @@ class PhaseType(str, Enum):
     THREE = "three"
 
 
+class DataSourceType(str, Enum):
+    """Data source type used by reporting calculations."""
+    METERED = "metered"
+    SENSOR = "sensor"
+
+
 class Device(Base):
     """Device model representing IoT devices in the system.
     
@@ -70,6 +76,14 @@ class Device(Base):
         String(20),
         nullable=True,
         index=True
+    )
+
+    # Report source type metadata
+    data_source_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=DataSourceType.METERED.value,
+        index=True,
     )
     
     # Legacy status field - DEPRECATED

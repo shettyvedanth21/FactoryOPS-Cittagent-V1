@@ -33,14 +33,12 @@ class ReportRepository:
     async def get_report(
         self,
         report_id: str,
-        tenant_id: str
+        tenant_id: Optional[str]
     ) -> Optional[EnergyReport]:
-        result = await self.db.execute(
-            select(EnergyReport).where(
-                EnergyReport.report_id == report_id,
-                EnergyReport.tenant_id == tenant_id
-            )
-        )
+        query = select(EnergyReport).where(EnergyReport.report_id == report_id)
+        if tenant_id is not None:
+            query = query.where(EnergyReport.tenant_id == tenant_id)
+        result = await self.db.execute(query)
         return result.scalar_one_or_none()
     
     async def update_report(

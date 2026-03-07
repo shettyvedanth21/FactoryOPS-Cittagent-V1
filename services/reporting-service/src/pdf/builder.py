@@ -1,28 +1,46 @@
 from datetime import datetime
 from io import BytesIO
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from weasyprint import HTML
 from jinja2 import Template
 
 from src.pdf import charts
 
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _to_ist_label(value: Any, fallback: str = "N/A", include_tz: bool = True) -> str:
+    if not value:
+        return fallback
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        out = dt.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
+        return f"{out} IST" if include_tz else out
+    except Exception:
+        return str(value)
+
 
 def generate_consumption_pdf(data: dict) -> bytes:
     daily_series = data.get("daily_series", [])
-    demand_windows = data.get("demand_windows", [])
-    pf_dist = data.get("pf_distribution", {})
+    per_device = data.get("per_device", [])
     
     charts_dict = {}
     if daily_series:
         charts_dict["daily_energy"] = charts.daily_energy_bar_chart(daily_series)
-    if demand_windows:
-        charts_dict["demand_curve"] = charts.demand_curve_chart(demand_windows)
-    if pf_dist:
-        charts_dict["pf_distribution"] = charts.power_factor_distribution_chart(pf_dist)
-    
+    if per_device:
+        charts_dict["device_share"] = charts.device_share_donut(per_device)
+
     data["charts"] = charts_dict
-    data["generated_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    data["generated_at"] = _to_ist_label(datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")))
+    data["peak_timestamp"] = _to_ist_label(data.get("peak_timestamp"))
+    data["tariff_fetched_at"] = _to_ist_label(data.get("tariff_fetched_at"))
     
     template = Template(get_consumption_report_template())
     html_content = template.render(**data)
@@ -38,7 +56,7 @@ def generate_comparison_pdf(data: dict) -> bytes:
     if metrics:
         data["comparison_chart"] = charts.comparison_bar_chart(metrics)
     
-    data["generated_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    data["generated_at"] = _to_ist_label(datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")))
     
     template = Template(get_comparison_report_template())
     html_content = template.render(**data)
@@ -55,40 +73,58 @@ def get_consumption_report_template():
     <meta charset="UTF-8">
     <title>Energy Consumption Report</title>
     <style>
-        @page { size: A4; margin: 2cm; }
-        body { font-family: Arial, sans-serif; font-size: 11px; color: #333; }
-        .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #1E3A5F; padding-bottom: 10px; }
-        .header h1 { color: #1E3A5F; margin: 0; font-size: 24px; }
-        .header p { margin: 5px 0; color: #666; }
-        .section { margin-bottom: 25px; }
-        .section h2 { color: #1E3A5F; font-size: 14px; border-bottom: 1px solid #ddd; padding-bottom: 5px; margin-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin-bottom: 15px; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 10px; }
-        th { background-color: #f5f5f5; font-weight: bold; }
-        tr:nth-child(even) { background-color: #fafafa; }
-        .kpi-grid { display: flex; justify-content: space-between; margin-bottom: 20px; }
-        .kpi-box { flex: 1; background: #f5f5f5; padding: 15px; margin: 0 5px; text-align: center; border-radius: 5px; }
-        .kpi-box:first-child { margin-left: 0; }
-        .kpi-box:last-child { margin-right: 0; }
-        .kpi-label { font-size: 10px; color: #666; text-transform: uppercase; }
-        .kpi-value { font-size: 20px; color: #1E3A5F; font-weight: bold; margin-top: 5px; }
-        .badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 10px; font-weight: bold; }
-        .badge-good { background: #d4edda; color: #155724; }
-        .badge-moderate { background: #fff3cd; color: #856404; }
-        .badge-poor { background: #f8d7da; color: #721c24; }
-        .insight { background-color: #e8f4f8; padding: 10px; margin: 5px 0; border-left: 3px solid #1E3A5F; font-size: 10px; }
-        .error-box { background-color: #fff3cd; padding: 10px; border-left: 3px solid #ffc107; color: #856404; }
-        .footer { text-align: center; margin-top: 30px; font-size: 9px; color: #999; border-top: 1px solid #ddd; padding-top: 10px; }
-        .chart-container { text-align: center; margin: 15px 0; }
-        .chart-container img { max-width: 100%; height: auto; }
+        @page { size: A4; margin: 1.4cm; }
+        body { font-family: "Segoe UI", Arial, sans-serif; font-size: 11px; color: #0f172a; line-height: 1.35; }
+        .header {
+            margin-bottom: 18px;
+            border-radius: 12px;
+            padding: 16px 18px;
+            color: white;
+            background: linear-gradient(120deg, #0f172a 0%, #1e3a8a 100%);
+        }
+        .header h1 { margin: 0 0 8px 0; font-size: 21px; font-weight: 700; letter-spacing: 0.2px; }
+        .header p { margin: 2px 0; color: rgba(255,255,255,0.9); font-size: 10.5px; }
+        .section { margin-bottom: 14px; break-inside: avoid; }
+        .section h2 { color: #1e3a8a; font-size: 13px; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; margin: 0 0 8px 0; }
+        .kpi-grid { display: table; width: 100%; border-spacing: 8px; margin-bottom: 10px; table-layout: fixed; }
+        .kpi-box {
+            display: table-cell; width: 25%;
+            border: 1px solid #dbeafe; background: #f8fafc;
+            border-radius: 10px; padding: 10px 6px; text-align: center;
+        }
+        .kpi-label { font-size: 9px; color: #475569; text-transform: uppercase; letter-spacing: 0.5px; }
+        .kpi-value { font-size: 16px; color: #1e3a8a; font-weight: 700; margin-top: 4px; }
+        .meta { color: #334155; font-size: 10px; margin-top: 4px; }
+        .warn-box {
+            background-color: #fff7ed; padding: 8px 10px; border-left: 3px solid #f59e0b;
+            color: #92400e; border-radius: 6px; margin-top: 8px; font-size: 10px;
+        }
+        .error-box {
+            background-color: #fef2f2; padding: 8px 10px; border-left: 3px solid #ef4444;
+            color: #991b1b; border-radius: 6px; margin-top: 8px; font-size: 10px;
+        }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; font-size: 9.5px; }
+        th { background-color: #f8fafc; color: #1e293b; font-weight: 600; }
+        tr:nth-child(even) { background-color: #f8fbff; }
+        .grid-2 { display: table; width: 100%; border-spacing: 8px; table-layout: fixed; }
+        .col { display: table-cell; width: 50%; vertical-align: top; }
+        .chart-container { text-align: center; margin-top: 8px; }
+        .chart-container img { max-width: 100%; max-height: 280px; height: auto; border: 1px solid #e2e8f0; border-radius: 8px; }
+        .insight {
+            background-color: #eff6ff; padding: 8px 10px; margin: 6px 0;
+            border-left: 3px solid #2563eb; border-radius: 6px; font-size: 10px;
+        }
+        .footer { text-align: center; margin-top: 12px; font-size: 9px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 7px; }
+        .page-split { page-break-before: always; margin-top: 4px; }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>Energy Consumption Report</h1>
-        <p><strong>Device:</strong> {{ device_name }}</p>
+        <p><strong>Scope:</strong> {{ device_label }}</p>
         <p><strong>Period:</strong> {{ start_date }} to {{ end_date }}</p>
-        <p><strong>Generated:</strong> {{ generated_at }}</p>
+        <p><strong>Generated:</strong> {{ generated_at }} | <strong>Tariff:</strong> {% if tariff_rate_used is not none %}{{ currency }} {{ tariff_rate_used }} / kWh{% else %}Not configured{% endif %}</p>
     </div>
     
     <div class="section">
@@ -104,127 +140,97 @@ def get_consumption_report_template():
             </div>
             <div class="kpi-box">
                 <div class="kpi-label">Load Factor</div>
-                <div class="kpi-value">{% if load_factor and load_factor.load_factor is defined %}{{ load_factor.load_factor }}{% elif load_factor_error %}N/A{% else %}N/A{% endif %}</div>
+                <div class="kpi-value">{% if load_factor_pct is not none %}{{ load_factor_pct }}%{% else %}N/A{% endif %}</div>
             </div>
             <div class="kpi-box">
                 <div class="kpi-label">Total Cost</div>
                 <div class="kpi-value">{% if total_cost is not none %}{{ currency }} {{ total_cost }}{% else %}N/A{% endif %}</div>
             </div>
         </div>
+        {% if peak_timestamp and peak_timestamp != "N/A" %}
+        <p class="meta"><strong>Peak demand timestamp:</strong> {{ peak_timestamp }}</p>
+        {% endif %}
+        {% if overall_quality != "high" %}
+        <div class="warn-box">Some calculations are estimated due to partial telemetry. See Data Notes section.</div>
+        {% endif %}
     </div>
-    
+
+    <div class="section">
+        <h2>Trend & Device Share</h2>
+        <div class="grid-2">
+            <div class="col">
+                {% if charts.daily_energy %}
+                <div class="chart-container">
+                    <img src="{{ charts.daily_energy }}" alt="Daily Energy Chart" />
+                </div>
+                {% endif %}
+            </div>
+            <div class="col">
+                {% if charts.device_share %}
+                <div class="chart-container">
+                    <img src="{{ charts.device_share }}" alt="Device Energy Share" />
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    {% if per_device %}
+    <div class="section page-split">
+        <h2>Device Breakdown</h2>
+        <table>
+            <tr><th>Device</th><th>kWh</th><th>Peak kW</th><th>Load Factor %</th><th>Quality</th><th>Method</th></tr>
+            {% for d in per_device %}
+            <tr>
+                <td>{{ d.device_name }}</td>
+                <td>{{ d.total_kwh if d.total_kwh is not none else "N/A" }}</td>
+                <td>{{ d.peak_demand_kw if d.peak_demand_kw is not none else "N/A" }}</td>
+                <td>{{ d.load_factor_pct if d.load_factor_pct is not none else "N/A" }}</td>
+                <td>{{ d.quality }}</td>
+                <td>{{ d.method }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+    {% endif %}
+
     {% if daily_series %}
     <div class="section">
-        <h2>Energy Breakdown</h2>
+        <h2>Daily Energy Breakdown</h2>
         <table>
-            <tr><th>Date</th><th>kWh</th></tr>
+            <tr><th>Date</th><th>Energy (kWh)</th></tr>
             {% for day in daily_series %}
             <tr><td>{{ day.date }}</td><td>{{ day.kwh }}</td></tr>
             {% endfor %}
         </table>
-        {% if charts.daily_energy %}
-        <div class="chart-container">
-            <img src="{{ charts.daily_energy }}" alt="Daily Energy Chart" />
-        </div>
-        {% endif %}
     </div>
     {% endif %}
-    
-    {% if demand and demand.peak_demand_kw is defined %}
-    <div class="section">
-        <h2>Demand Analysis</h2>
-        <p><strong>Peak Demand:</strong> {{ demand.peak_demand_kw }} kW at {{ demand.peak_demand_timestamp }}</p>
-        <p><strong>Window:</strong> {{ demand.demand_window_minutes }} minutes</p>
-        {% if demand.top_5_windows %}
-        <table>
-            <tr><th>Rank</th><th>Start Time</th><th>Avg kW</th></tr>
-            {% for w in demand.top_5_windows %}
-            <tr><td>{{ loop.index }}</td><td>{{ w.start }}</td><td>{{ w.avg_kw }}</td></tr>
-            {% endfor %}
-        </table>
-        {% endif %}
-        {% if charts.demand_curve %}
-        <div class="chart-container">
-            <img src="{{ charts.demand_curve }}" alt="Demand Curve Chart" />
-        </div>
-        {% endif %}
-    </div>
-    {% elif demand_error %}
-    <div class="section">
-        <h2>Demand Analysis</h2>
-        <div class="error-box">{{ demand_error }}</div>
-    </div>
-    {% endif %}
-    
-    {% if load_factor_data and load_factor_data.load_factor is defined %}
-    <div class="section">
-        <h2>Load Factor</h2>
-        <p><strong>Load Factor:</strong> {{ load_factor_data.load_factor }}</p>
-        <p><strong>Classification:</strong> <span class="badge badge-{{ load_factor_data.classification }}">{{ load_factor_data.classification }}</span></p>
-        <p><strong>Recommendation:</strong> {{ load_factor_data.recommendation }}</p>
-    </div>
-    {% elif load_factor_error %}
-    <div class="section">
-        <h2>Load Factor</h2>
-        <div class="error-box">{{ load_factor_error }}</div>
-    </div>
-    {% endif %}
-    
-    {% if reactive %}
-    <div class="section">
-        <h2>Reactive Power</h2>
-        <p><strong>Total kVARh:</strong> {{ reactive.total_kvarh }}</p>
-        <p><strong>Average PF:</strong> {{ reactive.avg_power_factor }}</p>
-        <p><strong>Below Threshold:</strong> {{ reactive.pf_below_threshold_pct }}%</p>
-        {% if charts.pf_distribution %}
-        <div class="chart-container">
-            <img src="{{ charts.pf_distribution }}" alt="PF Distribution Chart" />
-        </div>
-        {% endif %}
-    </div>
-    {% endif %}
-    
-    {% if power_quality %}
-    <div class="section">
-        <h2>Power Quality</h2>
-        {% if power_quality.voltage %}
-        <p><strong>Voltage:</strong> Mean {{ power_quality.voltage.mean }}V, Std {{ power_quality.voltage.std }}V</p>
-        <p><strong>Outside 10%:</strong> {{ power_quality.voltage.outside_10pct_pct }}%</p>
-        {% endif %}
-        {% if power_quality.frequency %}
-        <p><strong>Frequency:</strong> Mean {{ power_quality.frequency.mean }}Hz</p>
-        {% endif %}
-        {% if power_quality.thd %}
-        <p><strong>THD:</strong> Mean {{ power_quality.thd.mean }}%</p>
-        {% endif %}
-    </div>
-    {% endif %}
-    
-    {% if cost %}
+
     <div class="section">
         <h2>Cost Estimation</h2>
-        <table>
-            <tr><th>Component</th><th>Amount</th></tr>
-            <tr><td>Energy Cost</td><td>{{ currency }} {{ cost.energy_cost }}</td></tr>
-            <tr><td>Demand Cost</td><td>{{ currency }} {{ cost.demand_cost }}</td></tr>
-            {% if cost.reactive_penalty > 0 %}
-            <tr><td>Reactive Penalty</td><td>{{ currency }} {{ cost.reactive_penalty }}</td></tr>
-            {% endif %}
-            <tr><td>Fixed Charge</td><td>{{ currency }} {{ cost.fixed_charge }}</td></tr>
-            <tr><td><strong>Total</strong></td><td><strong>{{ currency }} {{ cost.total_cost }}</strong></td></tr>
-        </table>
+        <p class="meta"><strong>Tariff fetched at:</strong> {{ tariff_fetched_at }}</p>
+        {% if tariff_rate_used is not none %}
+        <p class="meta"><strong>Tariff used:</strong> {{ currency }} {{ tariff_rate_used }} / kWh</p>
+        <p class="meta"><strong>Total estimated cost:</strong> {{ currency }} {{ total_cost }}</p>
+        {% else %}
+        <div class="error-box">Tariff not configured — cost calculation skipped.</div>
+        {% endif %}
     </div>
-    {% elif cost_error %}
-    <div class="section">
-        <div class="error-box">Tariff not configured - cost estimation not available</div>
-    </div>
-    {% endif %}
     
     {% if insights %}
     <div class="section">
         <h2>Key Insights</h2>
         {% for insight in insights %}
-        <div class="insight">{{ insight }}</div>
+        <div class="insight">{{ loop.index }}. {{ insight }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if warnings %}
+    <div class="section">
+        <h2>Data Notes</h2>
+        {% for warning in warnings %}
+        <div class="warn-box">{{ warning }}</div>
         {% endfor %}
     </div>
     {% endif %}

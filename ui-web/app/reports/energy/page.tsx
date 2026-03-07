@@ -15,36 +15,15 @@ const DEFAULT_TENANT_ID = "tenant1";
 type ViewState = "empty" | "processing" | "completed" | "failed";
 
 interface ReportResult {
-  energy: {
-    data: {
-      total_kwh: number;
-      avg_power_w: number;
-      peak_power_w: number;
-      min_power_w: number;
-    };
-    success: boolean;
-  };
-  demand: {
-    data: {
-      peak_demand_kw: number;
-      peak_demand_timestamp: string;
-    };
-    success: boolean;
-  };
-  load_factor: {
-    data: {
-      load_factor: number;
-      classification: string;
-      recommendation: string;
-    };
-    success: boolean;
-  };
-  cost: {
-    total_cost: number;
+  summary: {
+    total_kwh: number;
+    peak_demand_kw: number | null;
+    load_factor_pct: number | null;
+    total_cost: number | null;
     currency: string;
   };
   insights: string[];
-  daily_series: Array<{ date: string; kwh: number }>;
+  warnings?: string[];
 }
 
 export default function EnergyReportPage() {
@@ -77,10 +56,10 @@ export default function EnergyReportPage() {
     try {
       const response = await submitConsumptionReport({
         tenant_id: DEFAULT_TENANT_ID,
-        device_ids: deviceIds,
+        device_id: deviceIds.length > 1 ? "ALL" : deviceIds[0],
         start_date: startDate,
         end_date: endDate,
-        group_by: groupBy,
+        report_name: "Energy Consumption Report",
       });
 
       setReportId(response.report_id);
@@ -244,31 +223,42 @@ export default function EnergyReportPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-blue-50 p-4 rounded-lg text-center">
                   <div className="text-2xl font-bold text-blue-600">
-                    {result.energy?.data?.total_kwh?.toFixed(1) ?? "—"}
+                    {result.summary?.total_kwh?.toFixed(1) ?? "—"}
                   </div>
                   <div className="text-sm text-gray-600">Total kWh</div>
                 </div>
                 <div className="bg-green-50 p-4 rounded-lg text-center">
                   <div className="text-2xl font-bold text-green-600">
-                    {result.demand?.data?.peak_demand_kw?.toFixed(1) ?? "—"}
+                    {result.summary?.peak_demand_kw != null ? result.summary.peak_demand_kw.toFixed(1) : "—"}
                   </div>
                   <div className="text-sm text-gray-600">Peak kW</div>
                 </div>
                 <div className="bg-purple-50 p-4 rounded-lg text-center">
                   <div className="text-2xl font-bold text-purple-600">
-                    {result.load_factor?.data?.load_factor 
-                      ? (result.load_factor.data.load_factor * 100).toFixed(1) + "%" 
+                    {result.summary?.load_factor_pct != null
+                      ? `${result.summary.load_factor_pct.toFixed(1)}%`
                       : "—"}
                   </div>
                   <div className="text-sm text-gray-600">Load Factor</div>
                 </div>
                 <div className="bg-orange-50 p-4 rounded-lg text-center">
                   <div className="text-2xl font-bold text-orange-600">
-                    {result.cost?.currency} {result.cost?.total_cost?.toFixed(0) ?? "0"}
+                    {result.summary?.currency} {result.summary?.total_cost?.toFixed(0) ?? "0"}
                   </div>
                   <div className="text-sm text-gray-600">Est. Cost</div>
                 </div>
               </div>
+
+              {result.warnings && result.warnings.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <h3 className="font-medium text-amber-900 mb-2">Data Notes</h3>
+                  <ul className="space-y-1">
+                    {result.warnings.slice(0, 5).map((w, i) => (
+                      <li key={i} className="text-sm text-amber-800">{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {result.insights && result.insights.length > 0 && (
                 <div>

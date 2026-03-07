@@ -1,6 +1,6 @@
 import logging
 import traceback
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -8,19 +8,16 @@ import httpx
 from src.config import settings
 from src.database import AsyncSessionLocal
 from src.repositories.report_repository import ReportRepository
-from src.repositories.tariff_repository import TariffRepository
+from src.repositories.settings_repository import SettingsRepository
 from src.services.influx_reader import influx_reader
+from src.services.report_engine import compute_device_report
+from src.services.insights_engine import generate_report_insights
 from src.services import (
     calculate_energy,
     calculate_demand,
-    calculate_load_factor,
-    calculate_reactive,
-    calculate_power_quality,
-    calculate_cost,
-    generate_insights,
 )
 from src.pdf.builder import generate_consumption_pdf, generate_comparison_pdf
-from src.storage.minio_client import minio_client, StorageError
+from src.storage.minio_client import minio_client
 from src.utils.serialization import clean_for_json, extract_engine_data
 
 
@@ -31,269 +28,290 @@ def is_error(result: dict) -> bool:
     return isinstance(result, dict) and result.get("success") is False
 
 
-def get_float(val):
-    if val is None:
-        return 0.0
-    from decimal import Decimal
-    if isinstance(val, Decimal):
-        return float(val)
-    if isinstance(val, (int, float)):
-        return float(val)
-    return 0.0
-
-
 async def run_consumption_report(report_id: str, params: dict) -> None:
     async with AsyncSessionLocal() as db:
         repo = ReportRepository(db)
-        tariff_repo = TariffRepository(db)
+        settings_repo = SettingsRepository(db)
         
         try:
             await repo.update_report(report_id, status="processing", progress=5)
-            
-            device_id = params.get("device_ids", [None])[0]
-            tenant_id = params.get("tenant_id")
+
+            tenant_id = params.get("tenant_id", "default")
             start_date_str = params.get("start_date")
             end_date_str = params.get("end_date")
-            
-            if not device_id or device_id == "all":
-                device_id = params.get("device_ids", [""])[0]
-            
+            request_device_id = params.get("device_id")
+            resolved_device_ids = params.get("resolved_device_ids", [])
+
             if isinstance(start_date_str, str):
                 start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
             else:
                 start_date = start_date_str
-                
+
             if isinstance(end_date_str, str):
                 end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
             else:
                 end_date = end_date_str
-            
-            if not device_id or not tenant_id or not start_date or not end_date:
+
+            if not start_date or not end_date:
                 await repo.update_report(
                     report_id,
                     status="failed",
                     error_code="INVALID_PARAMS",
-                    error_message="Missing required parameters"
+                    error_message="Missing required start_date/end_date"
                 )
                 return
-            
-            await repo.update_report(report_id, progress=10)
-            
-            async with httpx.AsyncClient() as client:
-                device_response = await client.get(
-                    f"{settings.DEVICE_SERVICE_URL}/api/v1/devices/{device_id}"
-                )
-                
-                if device_response.status_code != 200:
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                if resolved_device_ids:
+                    device_ids = [str(x) for x in resolved_device_ids]
+                elif isinstance(request_device_id, str) and request_device_id.upper() == "ALL":
+                    resp = await client.get(f"{settings.DEVICE_SERVICE_URL}/api/v1/devices")
+                    payload = resp.json() if resp.status_code == 200 else {}
+                    items = payload if isinstance(payload, list) else payload.get("data", [])
+                    device_ids = [d.get("device_id") for d in items if d.get("device_id")]
+                elif isinstance(request_device_id, str) and request_device_id.strip():
+                    device_ids = [request_device_id.strip()]
+                else:
+                    # Scheduler/backward internal params support
+                    device_ids = [d for d in params.get("device_ids", []) if d]
+
+                if not device_ids:
                     await repo.update_report(
                         report_id,
                         status="failed",
-                        error_code="DEVICE_NOT_FOUND",
-                        error_message=f"Device {device_id} not found"
+                        error_code="NO_VALID_DEVICES",
+                        error_message="No devices available for report generation",
                     )
                     return
-                
-                device_data = device_response.json()
-                if isinstance(device_data, dict) and "data" in device_data:
-                    device_data = device_data["data"]
-                
-                device_name = device_data.get("device_name", device_id)
-                device_type = device_data.get("device_type", "unknown")
-                phase_type = device_data.get("phase_type", "single")
-                
-                if device_type not in ("meter", "power_meter", "energy_meter"):
-                    logger.warning(
-                        f"Device {device_id} is type '{device_type}'. Proceeding anyway - will show friendly error if no data."
+
+                await repo.update_report(report_id, progress=15)
+
+                start_dt = datetime.combine(start_date, datetime.min.time())
+                end_dt = datetime.combine(end_date, datetime.max.time())
+
+                fields = [
+                    "energy_kwh",
+                    "power",
+                    "current",
+                    "voltage",
+                    "power_factor",
+                    "frequency",
+                    "kvar",
+                    "reactive_power",
+                    "run_hours",
+                    "voltage_l1",
+                    "voltage_l2",
+                    "voltage_l3",
+                ]
+
+                per_device: list[dict[str, Any]] = []
+                all_warnings: list[str] = []
+
+                for idx, device_id in enumerate(device_ids):
+                    device_resp = await client.get(f"{settings.DEVICE_SERVICE_URL}/api/v1/devices/{device_id}")
+                    if device_resp.status_code != 200:
+                        per_device.append(
+                            {
+                                "device_id": device_id,
+                                "device_name": device_id,
+                                "data_source_type": "metered",
+                                "quality": "insufficient",
+                                "method": "device_not_found",
+                                "error": f"Device lookup failed: {device_id}",
+                                "warnings": [],
+                                "total_kwh": None,
+                                "peak_demand_kw": None,
+                                "peak_timestamp": None,
+                                "average_load_kw": None,
+                                "load_factor_pct": None,
+                                "load_factor_band": None,
+                                "total_hours": 0.0,
+                                "daily_breakdown": [],
+                                "availability": {},
+                                "power_factor": None,
+                                "reactive": None,
+                            }
+                        )
+                        continue
+
+                    device_payload = device_resp.json()
+                    device_data = device_payload.get("data", {}) if isinstance(device_payload, dict) else {}
+                    device_name = device_data.get("device_name", device_id)
+                    data_source_type = str(device_data.get("data_source_type") or "metered")
+
+                    rows = await influx_reader.query_telemetry(
+                        device_id=device_id,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        fields=fields,
                     )
-            
-            await repo.update_report(report_id, progress=20)
-            
-            start_dt = datetime.combine(start_date, datetime.min.time())
-            end_dt = datetime.combine(end_date, datetime.max.time())
-            
-            fields = ["power", "voltage", "current", "power_factor", 
-                      "reactive_power", "frequency", "thd"]
-            
-            rows = await influx_reader.query_telemetry(
-                device_id=device_id,
-                start_dt=start_dt,
-                end_dt=end_dt,
-                fields=fields
-            )
-            
-            if not rows:
-                await repo.update_report(
-                    report_id,
-                    status="failed",
-                    error_code="NO_TELEMETRY_DATA",
-                    error_message="Reports cannot be generated for this device. No telemetry data available for the selected period. Please try again later."
+                    device_result = compute_device_report(
+                        rows=rows,
+                        device_id=device_id,
+                        device_name=device_name,
+                        data_source_type=data_source_type,
+                    )
+                    device_dict = clean_for_json(device_result.__dict__)
+                    for w in device_result.warnings:
+                        all_warnings.append(f"{device_name}: {w}")
+                    if device_result.error:
+                        all_warnings.append(f"{device_name}: {device_result.error}")
+                    per_device.append(device_dict)
+
+                    progress = 15 + int(((idx + 1) / max(len(device_ids), 1)) * 45)
+                    await repo.update_report(report_id, progress=min(progress, 60))
+
+                total_kwh = round(
+                    sum(float(d.get("total_kwh") or 0.0) for d in per_device if d.get("total_kwh") is not None),
+                    4,
                 )
-                return
-            
-            await repo.update_report(report_id, progress=35)
-            
-            energy_result = calculate_energy(rows, phase_type)
-            
-            if is_error(energy_result):
-                await repo.update_report(
-                    report_id,
-                    status="failed",
-                    error_code=energy_result.get("error_code", "ENERGY_ERROR"),
-                    error_message=energy_result.get("error_message", "Energy calculation failed")
+
+                peak_candidates = [d for d in per_device if d.get("peak_demand_kw") is not None]
+                peak_demand_kw = None
+                peak_timestamp = None
+                if peak_candidates:
+                    peak_row = max(peak_candidates, key=lambda d: float(d.get("peak_demand_kw") or 0.0))
+                    peak_demand_kw = peak_row.get("peak_demand_kw")
+                    peak_timestamp = peak_row.get("peak_timestamp")
+
+                total_hours = float(max((end_dt - start_dt).total_seconds() / 3600.0, 0.0))
+                average_load_kw = round((total_kwh / total_hours), 4) if total_hours > 0 else None
+                load_factor_pct = (
+                    round((average_load_kw / float(peak_demand_kw)) * 100.0, 2)
+                    if average_load_kw is not None and peak_demand_kw and float(peak_demand_kw) > 0
+                    else None
                 )
-                return
-            
-            await repo.update_report(report_id, progress=50)
-            
-            energy_data = extract_engine_data(energy_result)
-            power_series = energy_data.get("power_series", [])
-            
-            demand_result = calculate_demand(power_series, settings.DEMAND_WINDOW_MINUTES)
-            
-            await repo.update_report(report_id, progress=60)
-            
-            duration_hours = energy_data.get("duration_hours", 0)
-            
-            demand_data = extract_engine_data(demand_result)
-            peak_demand_kw = demand_data.get("peak_demand_kw", 0) if demand_data else 0
-            
-            load_factor_result = calculate_load_factor(
-                energy_data.get("total_kwh", 0),
-                duration_hours,
-                peak_demand_kw
-            )
-            
-            await repo.update_report(report_id, progress=65)
-            
-            reactive_result = calculate_reactive(rows, phase_type)
-            
-            await repo.update_report(report_id, progress=70)
-            
-            power_quality_result = calculate_power_quality(rows)
-            
-            await repo.update_report(report_id, progress=75)
-            
-            tariff = await tariff_repo.get_tariff(tenant_id)
-            tariff_dict = None
-            
-            if tariff:
-                tariff_dict = {
-                    "energy_rate_per_kwh": get_float(tariff.energy_rate_per_kwh),
-                    "demand_charge_per_kw": get_float(tariff.demand_charge_per_kw),
-                    "reactive_penalty_rate": get_float(tariff.reactive_penalty_rate),
-                    "fixed_monthly_charge": get_float(tariff.fixed_monthly_charge),
-                    "power_factor_threshold": get_float(tariff.power_factor_threshold) or 0.90,
-                    "currency": str(tariff.currency) if tariff.currency is not None else "INR"
+
+                if load_factor_pct is None:
+                    load_factor_band = None
+                elif load_factor_pct < 30:
+                    load_factor_band = "poor"
+                elif load_factor_pct <= 70:
+                    load_factor_band = "moderate"
+                else:
+                    load_factor_band = "good"
+
+                await repo.update_report(report_id, progress=70)
+
+                # Tariff source of truth: settings.tariff_config only
+                tariff_row = await settings_repo.get_tariff()
+                tariff_rate_used = float(tariff_row.rate) if tariff_row else None
+                tariff_currency = (tariff_row.currency or "INR") if tariff_row else "INR"
+                tariff_fetched_at = datetime.utcnow().isoformat()
+
+                total_cost = None
+                if tariff_rate_used is not None:
+                    total_cost = round(total_kwh * tariff_rate_used, 2)
+                else:
+                    all_warnings.append("Tariff not configured — cost calculations skipped")
+
+                # Add cost into per-day rows
+                for device in per_device:
+                    for day in device.get("daily_breakdown", []) or []:
+                        e = day.get("energy_kwh")
+                        if tariff_rate_used is not None and isinstance(e, (int, float)):
+                            day["cost"] = round(float(e) * tariff_rate_used, 2)
+                        else:
+                            day["cost"] = None
+
+                overall_quality = "high"
+                quality_rank = {"high": 0, "medium": 1, "low": 2, "insufficient": 3}
+                for d in per_device:
+                    q = d.get("quality", "insufficient")
+                    if quality_rank.get(q, 3) > quality_rank.get(overall_quality, 0):
+                        overall_quality = q
+
+                insights = generate_report_insights(
+                    per_device=per_device,
+                    overall_total_kwh=total_kwh,
+                    currency=tariff_currency,
+                )
+
+                await repo.update_report(report_id, progress=85)
+
+                # Flatten day-wise total across devices for chart
+                by_day: dict[str, float] = {}
+                for d in per_device:
+                    for row in d.get("daily_breakdown", []) or []:
+                        date_key = str(row.get("date"))
+                        if isinstance(row.get("energy_kwh"), (int, float)):
+                            by_day[date_key] = by_day.get(date_key, 0.0) + float(row["energy_kwh"])
+                daily_series = [{"date": k, "kwh": round(v, 4)} for k, v in sorted(by_day.items())]
+
+                pdf_payload = {
+                    "report_id": report_id,
+                    "device_label": "All Machines" if len(device_ids) > 1 else per_device[0].get("device_name", device_ids[0]),
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "total_kwh": total_kwh,
+                    "peak_demand_kw": peak_demand_kw,
+                    "peak_timestamp": peak_timestamp,
+                    "average_load_kw": average_load_kw,
+                    "load_factor_pct": load_factor_pct,
+                    "load_factor_band": load_factor_band,
+                    "total_cost": total_cost,
+                    "currency": tariff_currency,
+                    "tariff_rate_used": tariff_rate_used,
+                    "daily_series": daily_series,
+                    "per_device": per_device,
+                    "insights": insights,
+                    "warnings": all_warnings,
+                    "overall_quality": overall_quality,
+                    "tariff_fetched_at": tariff_fetched_at,
+                    "generated_at": datetime.utcnow().isoformat(),
                 }
-            else:
-                tariff_dict = {
-                    "energy_rate_per_kwh": 8.0,
-                    "demand_charge_per_kw": 0.0,
-                    "reactive_penalty_rate": 0.0,
-                    "fixed_monthly_charge": 0.0,
-                    "power_factor_threshold": 0.90,
-                    "currency": "INR"
-                }
-            
-            reactive_data = extract_engine_data(reactive_result)
-            total_kvarh = reactive_data.get("total_kvarh") if reactive_data else None
-            duration_days = (end_date - start_date).days
-            
-            cost_result = calculate_cost(
-                energy_data.get("total_kwh", 0),
-                peak_demand_kw,
-                total_kvarh,
-                tariff_dict,
-                duration_days
-            )
-            
-            cost_error = None
-            cost_result_data = None
-            if is_error(cost_result):
-                cost_error = cost_result.get("error_message", "Cost calculation failed")
-            else:
-                cost_result_data = cost_result.get("data")
-            
-            await repo.update_report(report_id, progress=80)
-            
-            insights = generate_insights(
-                energy_result,
-                demand_result if not is_error(demand_result) else None,
-                load_factor_result,
-                reactive_result,
-                cost_result_data,
-                device_name,
-                duration_days
-            )
-            
-            await repo.update_report(report_id, progress=85)
-            
-            daily_kwh_dict = energy_data.get("daily_kwh", {})
-            daily_series = [{"date": k, "kwh": round(v, 2)} for k, v in sorted(daily_kwh_dict.items())]
-            
-            total_from_daily = sum(d["kwh"] for d in daily_series)
-            
-            load_factor_data = extract_engine_data(load_factor_result)
-            reactive_data = extract_engine_data(reactive_result)
-            power_quality_data = extract_engine_data(power_quality_result)
-            
-            await repo.update_report(report_id, progress=90)
-            
-            pdf_data = {
-                "report_id": report_id,
-                "device_name": device_name,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "total_kwh": energy_data.get("total_kwh", 0),
-                "avg_power_w": energy_data.get("avg_power_w", 0),
-                "min_power_w": energy_data.get("min_power_w", 0),
-                "peak_power_w": energy_data.get("peak_power_w", 0),
-                "peak_demand_kw": demand_data.get("peak_demand_kw", None) if demand_data else None,
-                "demand_error": demand_result.get("error_message") if is_error(demand_result) else None,
-                "load_factor": load_factor_data if load_factor_data else None,
-                "load_factor_error": load_factor_result.get("error_message") if is_error(load_factor_result) else None,
-                "total_cost": cost_result_data.get("total_cost", None) if cost_result_data else None,
-                "currency": tariff_dict.get("currency", "INR"),
-                "daily_series": daily_series,
-                "demand": demand_data if demand_data else None,
-                "demand_windows": demand_data.get("all_window_averages", []) if demand_data else [],
-                "load_factor_data": load_factor_data if load_factor_data else None,
-                "reactive": reactive_data if reactive_data else None,
-                "pf_distribution": reactive_data.get("pf_distribution", {}) if reactive_data else {},
-                "power_quality": power_quality_data if power_quality_data else None,
-                "power_quality_error": power_quality_result.get("error_message") if is_error(power_quality_result) else None,
-                "cost": cost_result_data,
-                "cost_error": cost_error,
-                "insights": insights
-            }
-            
-            pdf_data_clean = clean_for_json(pdf_data)
-            
-            pdf_bytes = generate_consumption_pdf(pdf_data)
-            
-            await repo.update_report(report_id, progress=95)
-            
-            s3_key = f"reports/{tenant_id}/{report_id}.pdf"
-            minio_client.upload_pdf(pdf_bytes, s3_key)
-            
-            await repo.update_report(
-                report_id,
-                status="completed",
-                progress=100,
-                result_json=clean_for_json({
-                    "energy": energy_result,
-                    "demand": demand_result,
-                    "load_factor": load_factor_result,
-                    "reactive": reactive_result,
-                    "power_quality": power_quality_result,
-                    "cost": cost_result_data,
+
+                pdf_bytes = generate_consumption_pdf(clean_for_json(pdf_payload))
+                await repo.update_report(report_id, progress=95)
+
+                s3_key = f"reports/{tenant_id}/{report_id}.pdf"
+                minio_client.upload_pdf(pdf_bytes, s3_key)
+
+                result_json = {
+                    "schema_version": "3.0",
+                    "report_id": report_id,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "device_scope": "ALL" if len(device_ids) > 1 else device_ids[0],
+                    "summary": {
+                        "total_kwh": total_kwh,
+                        "peak_demand_kw": peak_demand_kw,
+                        "peak_timestamp": peak_timestamp,
+                        "average_load_kw": average_load_kw,
+                        "load_factor_pct": load_factor_pct,
+                        "load_factor_band": load_factor_band,
+                        "total_cost": total_cost,
+                        "currency": tariff_currency,
+                    },
+                    "data_quality": {
+                        "overall": overall_quality,
+                        "per_device": {
+                            d["device_id"]: {
+                                "quality": d.get("quality"),
+                                "method": d.get("method"),
+                                "warnings": d.get("warnings", []),
+                                "error": d.get("error"),
+                            }
+                            for d in per_device
+                        },
+                    },
+                    "warnings": all_warnings,
                     "insights": insights,
                     "daily_series": daily_series,
-                    "daily_total_kwh": total_from_daily
-                }),
-                s3_key=s3_key,
-                completed_at=datetime.utcnow()
-            )
+                    "devices": per_device,
+                    "tariff_rate_used": tariff_rate_used,
+                    "tariff_currency": tariff_currency,
+                    "tariff_fetched_at": tariff_fetched_at,
+                }
+
+                await repo.update_report(
+                    report_id,
+                    status="completed",
+                    progress=100,
+                    result_json=clean_for_json(result_json),
+                    s3_key=s3_key,
+                    completed_at=datetime.utcnow(),
+                )
             
         except Exception as e:
             logger.error(f"Report {report_id} failed: {traceback.format_exc()}")
@@ -409,18 +427,12 @@ async def run_comparison_report(report_id: str, params: dict) -> None:
                 
                 await repo.update_report(report_id, progress=80)
                 
-                tariff_repo = TariffRepository(db)
-                tariff = await tariff_repo.get_tariff(tenant_id)
-                
+                settings_repo = SettingsRepository(db)
+                settings_tariff = await settings_repo.get_tariff()
                 tariff_dict = {
-                    "energy_rate_per_kwh": 8.0,
-                    "currency": "INR"
+                    "energy_rate_per_kwh": float(settings_tariff.rate) if settings_tariff else None,
+                    "currency": str(settings_tariff.currency) if settings_tariff else "INR",
                 }
-                if tariff:
-                    tariff_dict = {
-                        "energy_rate_per_kwh": float(tariff.energy_rate_per_kwh or 8.0),
-                        "currency": str(tariff.currency or "INR")
-                    }
                 
                 await repo.update_report(report_id, progress=90)
                 

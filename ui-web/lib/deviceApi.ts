@@ -7,6 +7,7 @@ interface BackendDevice {
   device_id: string;
   device_name: string;
   device_type: string;
+  data_source_type?: "metered" | "sensor";
   status: string;
   location: string | null;
   runtime_status: string;
@@ -20,6 +21,7 @@ export interface Device {
   id: string;
   name: string;
   type: string;
+  data_source_type?: "metered" | "sensor";
   status: string;
   runtime_status: string;
   last_seen_timestamp: string | null;
@@ -40,6 +42,7 @@ function mapDevice(d: BackendDevice): Device {
     id: d.device_id,
     name: d.device_name,
     type: d.device_type,
+    data_source_type: d.data_source_type,
     status: d.status,
     runtime_status: d.runtime_status || "stopped",
     last_seen_timestamp: d.last_seen_timestamp,

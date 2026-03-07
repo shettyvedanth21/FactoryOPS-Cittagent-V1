@@ -146,13 +146,19 @@ async def create_energy_consumption_report(
     logger.info("ENERGY REPORT REQUEST RECEIVED")
     logger.info(f"  start_date: {request.start_date}")
     logger.info(f"  end_date: {request.end_date}")
-    logger.info(f"  device_ids: {request.device_ids}")
+    logger.info(f"  device_id: {request.device_id}")
     logger.info(f"  tenant_id: {request.tenant_id}")
     logger.info("="*60)
     
-    device_ids = list(request.device_ids)
-    
-    if "all" in device_ids:
+    request_device_id = (request.device_id or "").strip()
+    if not request_device_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "VALIDATION_ERROR", "message": "device_id is required"}
+        )
+
+    device_ids: list[str] = []
+    if request_device_id.upper() == "ALL":
         logger.info("Received 'all' device selection, resolving to actual device IDs")
         resolved_ids = await resolve_all_devices(request.tenant_id)
         
@@ -167,6 +173,9 @@ async def create_energy_consumption_report(
         
         device_ids = resolved_ids
         logger.info(f"Resolved device IDs: {device_ids}")
+    else:
+        await validate_device_for_reporting(request_device_id)
+        device_ids = [request_device_id]
     
     start_dt, end_dt = normalize_dates_to_utc(request.start_date, request.end_date)
     duration_seconds = (end_dt - start_dt).total_seconds()
@@ -191,9 +200,6 @@ async def create_energy_consumption_report(
             }
         )
     
-    for device_id in device_ids:
-        await validate_device_for_reporting(device_id)
-    
     repo = ReportRepository(db)
     
     report_id = str(uuid4())
@@ -201,7 +207,7 @@ async def create_energy_consumption_report(
     params = request.model_dump()
     params["start_date"] = str(params["start_date"])
     params["end_date"] = str(params["end_date"])
-    params["device_ids"] = device_ids
+    params["resolved_device_ids"] = device_ids
     
     await repo.create_report(
         report_id=report_id,
@@ -212,15 +218,17 @@ async def create_energy_consumption_report(
 
     task_params = {
         "tenant_id": request.tenant_id,
-        "device_ids": device_ids,
+        "device_id": request_device_id.upper() if request_device_id.upper() == "ALL" else request_device_id,
+        "resolved_device_ids": device_ids,
         "start_date": str(request.start_date),
         "end_date": str(request.end_date),
-        "group_by": request.group_by,
+        "report_name": request.report_name,
     }
     background_tasks.add_task(run_consumption_report, report_id, task_params)
     
     return ReportResponse(
         report_id=report_id,
-        status="pending",
-        created_at=datetime.utcnow().isoformat()
+        status="processing",
+        created_at=datetime.utcnow().isoformat(),
+        estimated_completion_seconds=15,
     )

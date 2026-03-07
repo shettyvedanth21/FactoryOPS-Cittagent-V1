@@ -55,7 +55,11 @@ UI should be available at: `http://localhost:3000`
 
 ## 2. Device Onboarding (UI-visible)
 
-Create a device in Device Service:
+Create devices in Device Service using `data_source_type`:
+- `metered` = non-smart / energy meter source
+- `sensor` = smart / CT sensor source
+
+### 2.1 Non-smart device (metered)
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/devices" \
@@ -64,6 +68,7 @@ curl -X POST "http://localhost:8000/api/v1/devices" \
     "device_id": "COMPRESSOR-001",
     "device_name": "Compressor 001",
     "device_type": "compressor",
+    "data_source_type": "metered",
     "phase_type": "three",
     "manufacturer": "Atlas Copco",
     "model": "GA37",
@@ -71,6 +76,26 @@ curl -X POST "http://localhost:8000/api/v1/devices" \
     "metadata_json": "{\"floor\":\"1\",\"line\":\"A\"}"
   }'
 ```
+
+### 2.2 Smart device (sensor)
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/devices" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "device_id": "COMPRESSOR-002",
+    "device_name": "Compressor 002",
+    "device_type": "compressor",
+    "data_source_type": "sensor",
+    "phase_type": "three",
+    "manufacturer": "Atlas Copco",
+    "model": "GA37",
+    "location": "Plant B",
+    "metadata_json": "{\"floor\":\"2\",\"line\":\"B\"}"
+  }'
+```
+
+`phase_type` is still accepted for backward compatibility, but reporting logic is driven by `data_source_type`.
 
 Verify onboarding:
 ```bash
@@ -157,4 +182,3 @@ curl -s "http://localhost:8081/api/v1/data/telemetry/COMPRESSOR-001?limit=10"
 - Do not run `docker compose down -v` in production (removes named volumes).
 - Keep `.env` values consistent across restarts/deployments.
 - For email alerts in rules, configure SMTP in `.env` (`EMAIL_*` or `SMTP_*` mapping used by rule engine).
-

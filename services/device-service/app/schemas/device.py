@@ -21,12 +21,15 @@ class DeviceBase(BaseModel):
     model: Optional[str] = Field(None, max_length=255, description="Device model")
     location: Optional[str] = Field(None, max_length=500, description="Physical location of device")
     phase_type: Optional[str] = Field(None, description="Electrical phase type: 'single' or 'three'")
+    data_source_type: str = Field("metered", description="Telemetry source type: 'metered' or 'sensor'")
     
     @model_validator(mode='after')
     def validate_phase_type(self) -> 'DeviceBase':
         """Validate phase_type field."""
         if self.phase_type is not None and self.phase_type not in ('single', 'three'):
             raise ValueError("phase_type must be 'single', 'three', or null")
+        if self.data_source_type not in ("metered", "sensor"):
+            raise ValueError("data_source_type must be 'metered' or 'sensor'")
         return self
 
 
@@ -64,9 +67,16 @@ class DeviceUpdate(BaseModel):
     manufacturer: Optional[str] = Field(None, max_length=255)
     model: Optional[str] = Field(None, max_length=255)
     location: Optional[str] = Field(None, max_length=500)
+    data_source_type: Optional[str] = Field(None, description="Telemetry source type: 'metered' or 'sensor'")
     # DEPRECATED: Status is now computed dynamically
     status: Optional[str] = Field(None, description="DEPRECATED: Ignored.")
     metadata_json: Optional[str] = Field(None, description="Additional metadata as JSON string")
+
+    @model_validator(mode='after')
+    def validate_update_fields(self) -> 'DeviceUpdate':
+        if self.data_source_type is not None and self.data_source_type not in ("metered", "sensor"):
+            raise ValueError("data_source_type must be 'metered' or 'sensor'")
+        return self
 
 
 class DeviceResponse(DeviceBase):

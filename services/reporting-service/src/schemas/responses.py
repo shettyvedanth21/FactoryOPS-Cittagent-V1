@@ -6,6 +6,7 @@ class ReportResponse(BaseModel):
     report_id: str
     status: str
     created_at: str
+    estimated_completion_seconds: int | None = None
 
 
 class ReportResultResponse(BaseModel):
