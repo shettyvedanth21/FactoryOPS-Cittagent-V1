@@ -2,6 +2,7 @@
 
 from datetime import timezone
 from typing import Optional
+import re
 
 import aiomysql
 
@@ -18,6 +19,14 @@ class CheckpointRepository:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._pool: aiomysql.Pool | None = None
+        self._table_name = self._safe_identifier(settings.checkpoint_table)
+
+    @staticmethod
+    def _safe_identifier(identifier: str) -> str:
+        """Allow only safe SQL identifiers for dynamic table names."""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier or ""):
+            raise ValueError("Invalid checkpoint table name")
+        return identifier
 
     async def initialize(self) -> None:
         """Initialize database connection pool and create tables."""
@@ -47,7 +56,7 @@ class CheckpointRepository:
 
     async def _create_table(self) -> None:
         """Create checkpoint table if not exists."""
-        table_name = self.settings.checkpoint_table
+        table_name = self._table_name
 
         create_table_query = f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
@@ -89,7 +98,7 @@ class CheckpointRepository:
         query = f"""
             SELECT id, device_id, last_exported_at, last_sequence, status,
                    s3_key, record_count, error_message, created_at, updated_at
-            FROM {self.settings.checkpoint_table}
+            FROM {self._table_name}
             WHERE device_id = %s
             ORDER BY last_exported_at DESC
             LIMIT 1
@@ -122,7 +131,7 @@ class CheckpointRepository:
     async def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         """Save a checkpoint to the database."""
         query = f"""
-            INSERT INTO {self.settings.checkpoint_table}
+            INSERT INTO {self._table_name}
                 (device_id, last_exported_at, last_sequence, status, s3_key,
                  record_count, error_message)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -137,7 +146,7 @@ class CheckpointRepository:
 
         lookup_query = f"""
             SELECT id, created_at, updated_at
-            FROM {self.settings.checkpoint_table}
+            FROM {self._table_name}
             WHERE device_id = %s AND last_exported_at = %s
             LIMIT 1
         """

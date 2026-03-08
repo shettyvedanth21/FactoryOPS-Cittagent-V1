@@ -72,8 +72,10 @@ services:
     entrypoint: >
       /bin/sh -c "
       /usr/bin/mc alias set local http://minio:9000 minio minio123;
-      /usr/bin/mc mb local/energy-platform-datasets;
+      /usr/bin/mc mb -p local/energy-platform-datasets;
       /usr/bin/mc anonymous set public local/energy-platform-datasets;
+      /usr/bin/mc mb -p local/factoryops-waste-reports;
+      /usr/bin/mc anonymous set public local/factoryops-waste-reports;
       exit 0;
       "
     networks:
@@ -105,7 +107,7 @@ services:
     build: ./services/device-service
     container_name: device-service
     environment:
-      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/energy_device_db
+      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/ai_factoryops
       - LOG_LEVEL=INFO
       - ENVIRONMENT=development
     ports:
@@ -150,7 +152,7 @@ services:
     build: ./services/rule-engine-service
     container_name: rule-engine-service
     environment:
-      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/energy_rule_db
+      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/ai_factoryops
       - LOG_LEVEL=INFO
       - ENVIRONMENT=development
       - EMAIL_ENABLED=${EMAIL_ENABLED:-true}
@@ -176,7 +178,7 @@ services:
       - API_PORT=8003
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
-      - MYSQL_DATABASE=energy_analytics_db
+      - MYSQL_DATABASE=ai_factoryops
       - MYSQL_USER=energy
       - MYSQL_PASSWORD=energy
       - S3_ENDPOINT_URL=http://minio:9000
@@ -211,7 +213,7 @@ services:
       - S3_BUCKET=energy-platform-datasets
       - CHECKPOINT_DB_HOST=mysql
       - CHECKPOINT_DB_PORT=3306
-      - CHECKPOINT_DB_NAME=energy_export_db
+      - CHECKPOINT_DB_NAME=ai_factoryops
       - CHECKPOINT_DB_USER=energy
       - CHECKPOINT_DB_PASSWORD=energy
       - DATA_SERVICE_URL=http://data-service:8081
@@ -235,12 +237,12 @@ services:
       - LOG_LEVEL=INFO
       - PORT=8085
       - HOST=0.0.0.0
-      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/energy_reporting_db
+      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/ai_factoryops
       - MYSQL_HOST=mysql
       - MYSQL_PORT=3306
       - MYSQL_USER=energy
       - MYSQL_PASSWORD=energy
-      - MYSQL_DATABASE=energy_reporting_db
+      - MYSQL_DATABASE=ai_factoryops
       - MINIO_ACCESS_KEY=minio
       - MINIO_SECRET_KEY=minio123
       - MINIO_BUCKET=energy-platform-datasets
@@ -264,6 +266,41 @@ services:
     networks:
       - energy-net
 
+  waste-analysis-service:
+    build: ./services/waste-analysis-service
+    container_name: waste-analysis-service
+    environment:
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+      - PORT=8087
+      - HOST=0.0.0.0
+      - DATABASE_URL=mysql+aiomysql://energy:energy@mysql:3306/ai_factoryops
+      - MINIO_ACCESS_KEY=minio
+      - MINIO_SECRET_KEY=minio123
+      - MINIO_BUCKET=factoryops-waste-reports
+      - MINIO_EXTERNAL_URL=http://localhost:9000
+      - MINIO_ENDPOINT=minio:9000
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=energy-token
+      - INFLUXDB_ORG=energy-org
+      - INFLUXDB_BUCKET=telemetry
+      - DEVICE_SERVICE_URL=http://device-service:8000
+      - REPORTING_SERVICE_URL=http://reporting-service:8085
+      - INFLUX_AGGREGATION_WINDOW=5m
+    ports:
+      - "8087:8087"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      reporting-service:
+        condition: service_started
+      device-service:
+        condition: service_started
+    networks:
+      - energy-net
+
   ui-web:
     build: ./ui-web
     container_name: ui-web
@@ -275,6 +312,7 @@ services:
       - rule-engine-service
       - analytics-service
       - data-export-service
+      - waste-analysis-service
     networks:
       - energy-net
     environment:

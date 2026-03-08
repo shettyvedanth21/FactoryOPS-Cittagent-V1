@@ -37,6 +37,10 @@ const nextConfig: NextConfig = {
         source: "/api/reports/:path(.*)",
         destination: "http://reporting-service:8085/api/reports/:path(.*)",
       },
+      {
+        source: "/api/waste/:path(.*)",
+        destination: "http://waste-analysis-service:8087/api/v1/waste/:path(.*)",
+      },
     ];
   },
 };

@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class RuleStatus(str, Enum):
@@ -31,6 +31,26 @@ class ConditionOperator(str, Enum):
     LESS_THAN_OR_EQUAL = "<="
 
 
+class RuleType(str, Enum):
+    """Rule type enumeration."""
+
+    THRESHOLD = "threshold"
+    TIME_BASED = "time_based"
+
+
+class CooldownMode(str, Enum):
+    """Cooldown behavior mode."""
+
+    INTERVAL = "interval"
+    NO_REPEAT = "no_repeat"
+
+
+class TimeCondition(str, Enum):
+    """Time-based trigger condition."""
+
+    RUNNING_IN_WINDOW = "running_in_window"
+
+
 class NotificationChannel(str, Enum):
     """Notification channel enumeration."""
     EMAIL = "email"
@@ -41,6 +61,10 @@ class NotificationChannel(str, Enum):
 class RuleBase(BaseModel):
     """Base schema with common rule fields."""
     
+    rule_type: RuleType = Field(
+        default=RuleType.THRESHOLD,
+        description="Rule type"
+    )
     rule_name: str = Field(
         ..., 
         min_length=1, 
@@ -56,19 +80,38 @@ class RuleBase(BaseModel):
         default=RuleScope.SELECTED_DEVICES,
         description="Rule scope - all devices or selected devices"
     )
-    property: str = Field(
-        ...,
+    property: Optional[str] = Field(
+        default=None,
         min_length=1,
         max_length=100,
         description="Property to monitor (e.g., temperature, voltage, power)"
     )
-    condition: ConditionOperator = Field(
-        ...,
+    condition: Optional[ConditionOperator] = Field(
+        default=None,
         description="Condition operator (>, <, =, !=, >=, <=)"
     )
-    threshold: float = Field(
-        ...,
+    threshold: Optional[float] = Field(
+        default=None,
         description="Threshold value for condition"
+    )
+    time_window_start: Optional[str] = Field(
+        default=None,
+        pattern=r"^\d{2}:\d{2}$",
+        description="Start time (HH:MM)"
+    )
+    time_window_end: Optional[str] = Field(
+        default=None,
+        pattern=r"^\d{2}:\d{2}$",
+        description="End time (HH:MM)"
+    )
+    timezone: str = Field(
+        default="Asia/Kolkata",
+        max_length=64,
+        description="Timezone name for time-window evaluation"
+    )
+    time_condition: Optional[TimeCondition] = Field(
+        default=None,
+        description="Time-based trigger condition"
     )
     notification_channels: List[NotificationChannel] = Field(
         default_factory=list,
@@ -81,6 +124,30 @@ class RuleBase(BaseModel):
         le=1440,
         description="Cooldown period in minutes between notifications"
     )
+    cooldown_mode: CooldownMode = Field(
+        default=CooldownMode.INTERVAL,
+        description="Cooldown behavior mode"
+    )
+
+    @model_validator(mode="after")
+    def validate_rule_by_type(self):
+        if self.scope == RuleScope.SELECTED_DEVICES and getattr(self, "device_ids", None) == []:
+            # device_ids is validated in RuleCreate with richer context; keep lightweight here.
+            pass
+
+        if self.rule_type == RuleType.THRESHOLD:
+            if self.property is None or self.condition is None or self.threshold is None:
+                raise ValueError("property, condition, and threshold are required for threshold rules")
+        elif self.rule_type == RuleType.TIME_BASED:
+            if not self.time_window_start or not self.time_window_end:
+                raise ValueError("time_window_start and time_window_end are required for time-based rules")
+            if self.time_condition is None:
+                self.time_condition = TimeCondition.RUNNING_IN_WINDOW
+
+        if self.cooldown_mode == CooldownMode.INTERVAL and self.cooldown_minutes is None:
+            raise ValueError("cooldown_minutes is required when cooldown_mode is 'interval'")
+
+        return self
 
 
 class RuleCreate(RuleBase):
@@ -96,10 +163,17 @@ class RuleCreate(RuleBase):
         description="List of device IDs for selected_devices scope"
     )
 
+    @model_validator(mode="after")
+    def validate_scope_devices(self):
+        if self.scope == RuleScope.SELECTED_DEVICES and not self.device_ids:
+            raise ValueError("device_ids is required when scope is 'selected_devices'")
+        return self
+
 
 class RuleUpdate(BaseModel):
     """Schema for updating an existing rule."""
     
+    rule_type: Optional[RuleType] = None
     rule_name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=1000)
     scope: Optional[RuleScope] = None
@@ -107,8 +181,13 @@ class RuleUpdate(BaseModel):
     property: Optional[str] = Field(None, min_length=1, max_length=100)
     condition: Optional[ConditionOperator] = None
     threshold: Optional[float] = None
+    time_window_start: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    time_window_end: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    time_condition: Optional[TimeCondition] = None
     notification_channels: Optional[List[NotificationChannel]] = None
     cooldown_minutes: Optional[int] = Field(None, ge=0, le=1440)
+    cooldown_mode: Optional[CooldownMode] = None
 
 
 class RuleStatusUpdate(BaseModel):
@@ -129,6 +208,7 @@ class RuleResponse(RuleBase):
     tenant_id: Optional[str] = None
     device_ids: List[str]
     status: RuleStatus
+    triggered_once: bool = False
     last_triggered_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime

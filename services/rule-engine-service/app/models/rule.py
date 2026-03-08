@@ -38,6 +38,20 @@ class ConditionOperator(str, Enum):
     LESS_THAN_OR_EQUAL = "<="
 
 
+class RuleType(str, Enum):
+    """Rule type enumeration."""
+
+    THRESHOLD = "threshold"
+    TIME_BASED = "time_based"
+
+
+class CooldownMode(str, Enum):
+    """Cooldown behavior mode."""
+
+    INTERVAL = "interval"
+    NO_REPEAT = "no_repeat"
+
+
 class Rule(Base):
     """Rule model for real-time telemetry evaluation."""
 
@@ -60,9 +74,26 @@ class Rule(Base):
         nullable=False,
     )
 
-    property: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    condition: Mapped[ConditionOperator] = mapped_column(String(20), nullable=False)
-    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    property: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    condition: Mapped[Optional[ConditionOperator]] = mapped_column(String(20), nullable=True)
+    threshold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    rule_type: Mapped[RuleType] = mapped_column(
+        String(20),
+        default=RuleType.THRESHOLD,
+        nullable=False,
+        index=True,
+    )
+    cooldown_mode: Mapped[CooldownMode] = mapped_column(
+        String(20),
+        default=CooldownMode.INTERVAL,
+        nullable=False,
+    )
+    time_window_start: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    time_window_end: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata", nullable=False)
+    time_condition: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    triggered_once: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     status: Mapped[RuleStatus] = mapped_column(
         String(50),
@@ -117,6 +148,9 @@ class Rule(Base):
         return self.status == RuleStatus.ACTIVE and self.deleted_at is None
 
     def is_in_cooldown(self) -> bool:
+        if self.cooldown_mode == CooldownMode.NO_REPEAT:
+            return bool(self.triggered_once)
+
         if self.last_triggered_at is None:
             return False
 

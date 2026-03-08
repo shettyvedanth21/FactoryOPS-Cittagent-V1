@@ -21,8 +21,10 @@ import signal
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.config import settings
 from src.handlers import MQTTHandler
@@ -113,6 +115,42 @@ def create_application() -> FastAPI:
     # ✅ WebSocket routes
     ws_router = create_websocket_router()
     app.include_router(ws_router)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "VALIDATION_ERROR",
+                "message": "Invalid request payload",
+                "code": "VALIDATION_ERROR",
+                "details": exc.errors(),
+            },
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        if isinstance(exc.detail, dict):
+            payload = dict(exc.detail)
+            payload.setdefault("code", payload.get("error", "HTTP_ERROR"))
+            payload.setdefault("message", "Request failed")
+            return JSONResponse(status_code=exc.status_code, content=payload)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": "HTTP_ERROR", "message": str(exc.detail), "code": "HTTP_ERROR"},
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.exception("Unhandled exception in data-service")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "INTERNAL_ERROR",
+                "message": "Unexpected server error",
+                "code": "INTERNAL_ERROR",
+            },
+        )
 
     return app
 

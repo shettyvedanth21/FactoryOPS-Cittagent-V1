@@ -6,9 +6,21 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.rule import Rule, RuleStatus, RuleScope, ConditionOperator, Alert
+from app.models.rule import (
+    Rule,
+    RuleStatus,
+    RuleScope,
+    Alert,
+    RuleType,
+    CooldownMode,
+)
 from app.repositories.rule import RuleRepository, AlertRepository, ActivityEventRepository
-from app.schemas.rule import RuleCreate, RuleUpdate, RuleStatus as RuleStatusEnum
+from app.schemas.rule import (
+    RuleCreate,
+    RuleUpdate,
+    RuleStatus as RuleStatusEnum,
+    RuleType as RuleTypeSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +35,15 @@ class RuleService:
 
     async def create_rule(self, rule_data: RuleCreate) -> Rule:
 
-        if rule_data.scope == RuleScope.SELECTED_DEVICES and not rule_data.device_ids:
-            raise ValueError("device_ids is required when scope is 'selected_devices'")
-
         if not rule_data.notification_channels:
             raise ValueError("At least one notification channel is required")
+
+        if rule_data.rule_type == RuleTypeSchema.THRESHOLD:
+            if rule_data.property is None or rule_data.condition is None or rule_data.threshold is None:
+                raise ValueError("property, condition and threshold are required for threshold rules")
+        elif rule_data.rule_type == RuleTypeSchema.TIME_BASED:
+            if not rule_data.time_window_start or not rule_data.time_window_end:
+                raise ValueError("time_window_start and time_window_end are required for time-based rules")
 
         rule = Rule(
             tenant_id=rule_data.tenant_id,
@@ -40,9 +56,16 @@ class RuleService:
             property=rule_data.property,
 
             # store STRING in DB
-            condition=rule_data.condition.value,
+            condition=rule_data.condition.value if rule_data.condition else None,
 
             threshold=rule_data.threshold,
+            rule_type=rule_data.rule_type.value,
+            cooldown_mode=rule_data.cooldown_mode.value,
+            time_window_start=rule_data.time_window_start,
+            time_window_end=rule_data.time_window_end,
+            timezone=rule_data.timezone,
+            time_condition=rule_data.time_condition.value if rule_data.time_condition else None,
+            triggered_once=False,
 
             # store STRING in DB
             status=RuleStatus.ACTIVE.value,
@@ -136,11 +159,49 @@ class RuleService:
 
             elif field == "notification_channels" and value:
                 value = [ch.value for ch in value]
+            elif field == "rule_type" and value:
+                value = value.value
+            elif field == "cooldown_mode" and value:
+                value = value.value
+            elif field == "time_condition" and value:
+                value = value.value
 
             setattr(rule, field, value)
 
         if rule.scope == RuleScope.SELECTED_DEVICES.value and not rule.device_ids:
             raise ValueError("device_ids is required when scope is 'selected_devices'")
+
+        if rule.rule_type == RuleType.TIME_BASED.value:
+            if not rule.time_window_start or not rule.time_window_end:
+                raise ValueError("time_window_start and time_window_end are required for time-based rules")
+            rule.property = None
+            rule.condition = None
+            rule.threshold = None
+            if not rule.time_condition:
+                rule.time_condition = "running_in_window"
+        else:
+            if rule.property is None or rule.condition is None or rule.threshold is None:
+                raise ValueError("property, condition and threshold are required for threshold rules")
+            rule.time_window_start = None
+            rule.time_window_end = None
+            rule.time_condition = None
+
+        # Manual reset for no-repeat when core condition is edited
+        if rule.cooldown_mode == CooldownMode.NO_REPEAT.value:
+            core_keys = {
+                "rule_type",
+                "property",
+                "condition",
+                "threshold",
+                "scope",
+                "device_ids",
+                "time_window_start",
+                "time_window_end",
+                "timezone",
+                "time_condition",
+            }
+            if any(k in update_data for k in core_keys):
+                rule.triggered_once = False
 
         updated_rule = await self._repository.update(rule)
         await self._session.commit()
@@ -181,6 +242,9 @@ class RuleService:
         )
 
         if rule:
+            # Manual reset: pause -> active unlocks no-repeat rules
+            if status.value == RuleStatus.ACTIVE.value and rule.cooldown_mode == CooldownMode.NO_REPEAT.value:
+                rule.triggered_once = False
             await self._session.commit()
             logger.info(
                 "Rule status updated",
@@ -260,10 +324,16 @@ class AlertService:
         actual_value: float,
         severity: str = "medium",
     ) -> Alert:
+        is_time_based = rule.rule_type == RuleType.TIME_BASED.value
+        threshold_value = rule.threshold if rule.threshold is not None else (1.0 if is_time_based else 0.0)
+        if is_time_based:
+            condition_text = f"running in window {rule.time_window_start}-{rule.time_window_end} IST"
+        else:
+            condition_text = f"{rule.property} {rule.condition} {rule.threshold}"
 
         message = (
             f"Rule '{rule.rule_name}' triggered for device {device_id}: "
-            f"{rule.property} {rule.condition} {rule.threshold} "
+            f"{condition_text} "
             f"(actual: {actual_value})"
         )
 
@@ -274,7 +344,7 @@ class AlertService:
             severity=severity,
             message=message,
             actual_value=actual_value,
-            threshold_value=rule.threshold,
+            threshold_value=threshold_value,
             status="open",
         )
 

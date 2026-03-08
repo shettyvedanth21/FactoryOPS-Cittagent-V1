@@ -307,6 +307,7 @@ async def _monitor_fleet(
                     job_id=parent_job_id,
                     analysis_type=analysis_type,
                     device_results=device_formatted,
+                    child_job_map=child_jobs,
                 )
                 fleet_formatted["execution_metadata"] = {
                     "fleet_policy": "strict",

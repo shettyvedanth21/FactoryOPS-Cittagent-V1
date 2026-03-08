@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     
     # Database
-    DATABASE_URL: str = "mysql+aiomysql://energy:energy@localhost:3306/energy_rule_db"
+    DATABASE_URL: str = "mysql+aiomysql://energy:energy@localhost:3306/ai_factoryops"
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
     DATABASE_POOL_TIMEOUT: int = 30

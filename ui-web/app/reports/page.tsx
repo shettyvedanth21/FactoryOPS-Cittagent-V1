@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getReportHistory, ReportHistoryItem, getSchedules, deleteSchedule, createSchedule, ScheduleListItem, ScheduleParams, getReportDownload } from "@/lib/reportApi";
 import { getDevices, Device } from "@/lib/deviceApi";
+import { formatIST } from "@/lib/utils";
 
 const DEFAULT_TENANT_ID = "tenant1";
 
@@ -43,8 +44,9 @@ export default function ReportsPage() {
         setHistory(historyData.reports);
         setSchedules(schedulesData.schedules);
         setDevices(devicesData);
-      } catch (error) {
-        console.error("Failed to fetch data:", error);
+      } catch {
+        setToast({ message: "Failed to load reports data", type: "error" });
+        setTimeout(() => setToast(null), 3000);
       } finally {
         setLoading(false);
       }
@@ -129,13 +131,7 @@ export default function ReportsPage() {
 
   const formatDate = (dateStr: string | null): string => {
     if (!dateStr) return "-";
-    return new Date(dateStr).toLocaleDateString("en-GB", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return formatIST(dateStr, "-");
   };
 
   const getStatusBadge = (status: string) => {

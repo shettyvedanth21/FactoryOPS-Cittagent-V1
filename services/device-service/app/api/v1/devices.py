@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -38,6 +39,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class IdleConfigRequest(BaseModel):
+    idle_current_threshold: float = Field(..., gt=0)
 
 
 # =====================================================
@@ -881,3 +886,99 @@ async def device_heartbeat(
         "last_seen_timestamp": device.last_seen_timestamp.isoformat() if device.last_seen_timestamp else None,
         "runtime_status": device.get_runtime_status()
     }
+
+
+# =====================================================
+# Idle Running Endpoints
+# =====================================================
+
+@router.get(
+    "/{device_id}/idle-config",
+    response_model=dict,
+    responses={404: {"model": ErrorResponse, "description": "Device not found"}},
+)
+async def get_idle_config(
+    device_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.idle_running import IdleRunningService
+
+    service = IdleRunningService(db)
+    try:
+        data = await service.get_idle_config(device_id)
+        return {"success": True, **data}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+
+
+@router.post(
+    "/{device_id}/idle-config",
+    response_model=dict,
+    responses={
+        400: {"model": ErrorResponse, "description": "Validation error"},
+        404: {"model": ErrorResponse, "description": "Device not found"},
+    },
+)
+async def set_idle_config(
+    device_id: str,
+    payload: IdleConfigRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.idle_running import IdleRunningService
+
+    service = IdleRunningService(db)
+    try:
+        data = await service.set_idle_config(device_id, payload.idle_current_threshold)
+        return {"success": True, **data}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+
+
+@router.get(
+    "/{device_id}/current-state",
+    response_model=dict,
+    responses={404: {"model": ErrorResponse, "description": "Device not found"}},
+)
+async def get_current_state(
+    device_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.idle_running import IdleRunningService
+
+    service = IdleRunningService(db)
+    try:
+        data = await service.get_current_state(device_id)
+        return {"success": True, **data}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+
+
+@router.get(
+    "/{device_id}/idle-stats",
+    response_model=dict,
+    responses={404: {"model": ErrorResponse, "description": "Device not found"}},
+)
+async def get_idle_stats(
+    device_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.idle_running import IdleRunningService
+
+    service = IdleRunningService(db)
+    try:
+        data = await service.get_idle_stats(device_id)
+        return {"success": True, **data}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )

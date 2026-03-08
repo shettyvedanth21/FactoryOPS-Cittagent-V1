@@ -1,13 +1,16 @@
 from datetime import datetime, timedelta, date
 from uuid import uuid4
 from typing import Optional
+import asyncio
+import hashlib
+import json
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.database import get_db
+from src.database import get_db, AsyncSessionLocal
 from src.models import EnergyReport, ReportType, ReportStatus
 from src.schemas.requests import ConsumptionReportRequest
 from src.schemas.responses import ReportResponse
@@ -15,6 +18,24 @@ from src.repositories.report_repository import ReportRepository
 from src.tasks.report_task import run_consumption_report
 
 router = APIRouter(tags=["energy-reports"])
+
+
+async def _run_consumption_report_with_timeout(report_id: str, task_params: dict) -> None:
+    try:
+        await asyncio.wait_for(
+            run_consumption_report(report_id, task_params),
+            timeout=max(1, settings.REPORT_JOB_TIMEOUT_SECONDS),
+        )
+    except asyncio.TimeoutError:
+        async with AsyncSessionLocal() as db:
+            repo = ReportRepository(db)
+            await repo.update_report(
+                report_id,
+                status="failed",
+                progress=100,
+                error_code="JOB_TIMEOUT",
+                error_message=f"Report exceeded timeout ({settings.REPORT_JOB_TIMEOUT_SECONDS}s)",
+            )
 
 
 async def resolve_all_devices(tenant_id: str) -> list[str]:
@@ -201,6 +222,32 @@ async def create_energy_consumption_report(
         )
     
     repo = ReportRepository(db)
+    dedup_payload = {
+        "tenant_id": request.tenant_id,
+        "report_type": "consumption",
+        "device_id": request_device_id.upper() if request_device_id.upper() == "ALL" else request_device_id,
+        "resolved_device_ids": sorted(device_ids),
+        "start_date": str(request.start_date),
+        "end_date": str(request.end_date),
+        "report_name": request.report_name or "",
+    }
+    dedup_signature = hashlib.sha256(
+        json.dumps(dedup_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    duplicate = await repo.find_active_duplicate(
+        tenant_id=request.tenant_id,
+        report_type="consumption",
+        dedup_signature=dedup_signature,
+    )
+    if duplicate:
+        dup_status = duplicate.status.value if hasattr(duplicate.status, "value") else str(duplicate.status)
+        return ReportResponse(
+            report_id=duplicate.report_id,
+            status=dup_status,
+            created_at=duplicate.created_at.isoformat() if duplicate.created_at else datetime.utcnow().isoformat(),
+            estimated_completion_seconds=15,
+        )
     
     report_id = str(uuid4())
     
@@ -208,6 +255,7 @@ async def create_energy_consumption_report(
     params["start_date"] = str(params["start_date"])
     params["end_date"] = str(params["end_date"])
     params["resolved_device_ids"] = device_ids
+    params["dedup_signature"] = dedup_signature
     
     await repo.create_report(
         report_id=report_id,
@@ -224,7 +272,7 @@ async def create_energy_consumption_report(
         "end_date": str(request.end_date),
         "report_name": request.report_name,
     }
-    background_tasks.add_task(run_consumption_report, report_id, task_params)
+    background_tasks.add_task(_run_consumption_report_with_timeout, report_id, task_params)
     
     return ReportResponse(
         report_id=report_id,

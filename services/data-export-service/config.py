@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # Checkpoint Storage (MySQL)
     checkpoint_db_host: str = "localhost"
     checkpoint_db_port: int = 3306
-    checkpoint_db_name: str = "energy_export_db"
+    checkpoint_db_name: str = "ai_factoryops"
     checkpoint_db_user: str = ""
     checkpoint_db_password: str = ""
     checkpoint_table: str = "export_checkpoints"

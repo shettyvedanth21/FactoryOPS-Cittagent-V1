@@ -66,8 +66,8 @@ class TelemetryValidator:
 
             return True, None, None
 
-        except Exception as e:
-            return False, "validation_error", str(e)
+        except Exception:
+            return False, "validation_error", "Unexpected validation error"
 
     @classmethod
     def _check_required_fields(
@@ -120,8 +120,8 @@ class TelemetryValidator:
                 pass
             else:
                 return f"Invalid timestamp type: {type(timestamp)}"
-        except (ValueError, OSError) as e:
-            return f"Invalid timestamp format: {e}"
+        except (ValueError, OSError):
+            return "Invalid timestamp format"
 
         return None
 
@@ -153,8 +153,8 @@ class TelemetryValidator:
         try:
             from src.models import TelemetryPayload
             return TelemetryPayload(**payload)
-        except Exception as e:
+        except Exception:
             raise ValidationError(
-                f"Failed to parse payload: {e}",
+                "Failed to parse payload",
                 "parse_error",
             )

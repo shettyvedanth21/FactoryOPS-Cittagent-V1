@@ -171,5 +171,11 @@ async def download_report(
                 "Content-Length": str(len(pdf_bytes))
             }
         )
-    except StorageError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except StorageError:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "PDF_NOT_FOUND",
+                "message": "Report file not available",
+            },
+        )

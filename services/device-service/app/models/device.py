@@ -4,7 +4,7 @@ from datetime import datetime, time, timezone, timedelta
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import String, DateTime, Text, Integer, ForeignKey, Time, Float, Boolean, UniqueConstraint
+from sqlalchemy import String, DateTime, Text, Integer, ForeignKey, Time, Float, Boolean, UniqueConstraint, Numeric, BigInteger, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -84,6 +84,12 @@ class Device(Base):
         nullable=False,
         default=DataSourceType.METERED.value,
         index=True,
+    )
+
+    # Idle detection threshold in amperes (per-device configuration)
+    idle_current_threshold: Mapped[Optional[float]] = mapped_column(
+        Numeric(10, 4),
+        nullable=True,
     )
     
     # Legacy status field - DEPRECATED
@@ -413,3 +419,39 @@ class DeviceProperty(Base):
     
     def __repr__(self) -> str:
         return f"<DeviceProperty(device_id={self.device_id}, property={self.property_name})>"
+
+
+class IdleRunningLog(Base):
+    """Daily aggregate idle-running consumption log per device."""
+
+    __tablename__ = "idle_running_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("devices.device_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idle_duration_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    idle_energy_kwh: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    idle_cost: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, default="INR")
+    tariff_rate_used: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0)
+    pf_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("device_id", "period_start", name="uq_idle_log_device_day"),
+        Index("idx_idle_log_device_period", "device_id", "period_start"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IdleRunningLog(device_id={self.device_id}, period_start={self.period_start})>"

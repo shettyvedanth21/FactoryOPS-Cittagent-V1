@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     
     # Database
-    DATABASE_URL: str = "mysql+aiomysql://energy:energy@localhost:3306/energy_device_db"
+    DATABASE_URL: str = "mysql+aiomysql://energy:energy@localhost:3306/ai_factoryops"
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
     DATABASE_POOL_TIMEOUT: int = 30
@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Service integration
     DATA_SERVICE_BASE_URL: str = "http://data-service:8081"
     RULE_ENGINE_SERVICE_BASE_URL: str = "http://rule-engine-service:8002"
+    REPORTING_SERVICE_BASE_URL: str = "http://reporting-service:8085"
 
     # Performance trends
     PERFORMANCE_TRENDS_ENABLED: bool = True

@@ -180,7 +180,9 @@ def build_params_from_template(params_template: dict, frequency: str, tenant_id:
 
 
 async def wait_for_report_completion(report_id: str, tenant_id: str, max_wait: int = 300) -> None:
-    for _ in range(max_wait):
+    poll_interval = 2
+    attempts = max(1, max_wait // poll_interval)
+    for _ in range(attempts):
         await asyncio.sleep(2)
         
         async with AsyncSessionLocal() as db:

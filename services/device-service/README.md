@@ -1,187 +1,99 @@
 # Device Service
 
-Energy Intelligence Platform - Device Management Service
+Device metadata, configuration, health scoring, shifts, runtime trends, and idle-running APIs for FactoryOPS.
 
-## Overview
+## Base URL
+- `http://<host>:8000`
+- API prefix: `/api/v1`
 
-This service provides device metadata CRUD operations for the Energy Intelligence Platform. It's built with Python 3.11, FastAPI, and SQLAlchemy async.
+## Health Endpoints
+- `GET /health`
+- `GET /ready`
 
-## Features
+## Device APIs (`/api/v1/devices`)
 
-- **Device CRUD**: Create, read, update, and delete device metadata
-- **Multi-tenant Ready**: Architecture supports future multi-tenancy
-- **Async Operations**: Full async/await support with aiomysql
-- **Structured Logging**: JSON-formatted logs for observability
-- **Health Checks**: Kubernetes-ready health and readiness endpoints
-- **Database Migrations**: Alembic for schema versioning
+### Core
+- `GET /api/v1/devices`
+- `POST /api/v1/devices`
+- `GET /api/v1/devices/{device_id}`
+- `PUT /api/v1/devices/{device_id}`
+- `DELETE /api/v1/devices/{device_id}`
 
-## Technology Stack
+### Dashboard / Properties
+- `GET /api/v1/devices/dashboard/summary`
+- `GET /api/v1/devices/properties`
+- `POST /api/v1/devices/properties/common`
+- `GET /api/v1/devices/{device_id}/properties`
+- `POST /api/v1/devices/{device_id}/properties/sync`
 
-- Python 3.11+
-- FastAPI
-- SQLAlchemy 2.0 (async)
-- aiomysql
-- Pydantic v2
-- Alembic
-- MySQL 15+
+### Shifts
+- `POST /api/v1/devices/{device_id}/shifts`
+- `GET /api/v1/devices/{device_id}/shifts`
+- `GET /api/v1/devices/{device_id}/shifts/{shift_id}`
+- `PUT /api/v1/devices/{device_id}/shifts/{shift_id}`
+- `DELETE /api/v1/devices/{device_id}/shifts/{shift_id}`
 
-## Project Structure
+### Uptime / Performance
+- `GET /api/v1/devices/{device_id}/uptime`
+- `GET /api/v1/devices/{device_id}/performance-trends`
+- `POST /api/v1/devices/{device_id}/heartbeat`
 
-```
-services/device-service/
-├── app/
-│   ├── __init__.py              # FastAPI app factory
-│   ├── main.py                  # Entry point
-│   ├── config.py                # Configuration management
-│   ├── database.py              # SQLAlchemy setup
-│   ├── logging_config.py        # Structured logging
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── device.py            # Device SQLAlchemy model
-│   ├── schemas/
-│   │   ├── __init__.py
-│   │   └── device.py            # Pydantic schemas
-│   ├── repositories/
-│   │   ├── __init__.py
-│   │   └── device.py            # Repository layer
-│   ├── services/
-│   │   ├── __init__.py
-│   │   └── device.py            # Business logic
-│   └── api/
-│       ├── __init__.py
-│       └── v1/
-│           ├── __init__.py
-│           ├── router.py        # API router aggregation
-│           └── devices.py       # Device endpoints
-├── alembic/
-│   ├── env.py                   # Alembic environment
-│   ├── script.py.mako           # Migration template
-│   └── versions/                # Migration files
-├── requirements.txt
-├── alembic.ini
-└── README.md
-```
+### Parameter Health Configuration
+- `POST /api/v1/devices/{device_id}/health-config`
+- `GET /api/v1/devices/{device_id}/health-config`
+- `GET /api/v1/devices/{device_id}/health-config/validate-weights`
+- `GET /api/v1/devices/{device_id}/health-config/{config_id}`
+- `PUT /api/v1/devices/{device_id}/health-config/{config_id}`
+- `DELETE /api/v1/devices/{device_id}/health-config/{config_id}`
+- `POST /api/v1/devices/{device_id}/health-config/bulk`
+- `POST /api/v1/devices/{device_id}/health-score`
 
-## Installation
+### Idle Running / Load State
+- `GET /api/v1/devices/{device_id}/idle-config`
+- `POST /api/v1/devices/{device_id}/idle-config`
+- `GET /api/v1/devices/{device_id}/current-state`
+- `GET /api/v1/devices/{device_id}/idle-stats`
 
-1. Create virtual environment:
-```bash
-python3.11 -m venv venv
-source venv/bin/activate
-```
+## Health Score Formula (Implemented)
+Code: `app/services/health_config.py`
 
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+For each configured parameter:
+1. Compute raw score `0..100` from value vs normal/max bands.
+2. Compute weighted score:
+   - `weighted_score = raw_score * (weight / 100)`
+3. Sum weighted scores across included parameters.
 
-3. Set environment variables (or create `.env` file):
-```bash
-export DATABASE_URL="mysql+aiomysql://energy:energy@localhost:3306/energy_device_db"
-export LOG_LEVEL="INFO"
-export ENVIRONMENT="development"
-```
+Overall:
+- `health_score = round(sum(weighted_scores), 2)`
+- If no parameters are included (missing telemetry/ignored): `health_score = null`
 
-4. Run database migrations:
-```bash
-alembic upgrade head
-```
+Raw score behavior:
+- Inside normal band: `70..100` based on distance from ideal center.
+- Outside normal but inside max band: `25..69`.
+- Beyond max band: drops toward `0`.
 
-## Running the Service
+## Idle/Load State Rules
+Code: `app/services/idle_running.py`
 
-### Development
-```bash
-python main.py
-```
+State detection:
+- `unloaded`: `current <= 0 && voltage > 0`
+- `idle`: `0 < current < threshold && voltage > 0`
+- `running`: `current >= threshold && voltage > 0`
+- `unknown`: missing fields, stale conditions, or threshold unavailable where required
 
-### Production
-```bash
-uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
-```
+Power for idle energy:
+- direct power if available
+- else derived `power_kw = (current * voltage * pf) / 1000`
+- if PF missing -> assume `pf=1.0`, mark `pf_estimated=true`
 
-## API Endpoints
+Idle cost:
+- computed from live tariff settings using cached tariff fetch (TTL 60s)
 
-### Health Checks
-- `GET /health` - Health check
-- `GET /ready` - Readiness probe (includes DB connectivity check)
+## Runtime/Status Contract
+- Runtime `running/stopped` comes from heartbeat freshness logic.
+- Load state (`in load/idle/unloaded/unknown`) is separate electrical-state logic.
+- UI precedence: if runtime is stopped, load badge should display Unknown.
 
-### Device Management
-- `GET /api/v1/devices` - List all devices (with pagination)
-- `GET /api/v1/devices/{device_id}` - Get device by ID
-- `POST /api/v1/devices` - Create new device
-- `PUT /api/v1/devices/{device_id}` - Update device
-- `DELETE /api/v1/devices/{device_id}` - Delete device (soft delete by default)
-
-## API Documentation
-
-When running in development mode, API documentation is available at:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## Database Migrations
-
-### Create new migration
-```bash
-alembic revision --autogenerate -m "description"
-```
-
-### Apply migrations
-```bash
-alembic upgrade head
-```
-
-### Rollback
-```bash
-alembic downgrade -1
-```
-
-## Device Model
-
-The Device model includes the following fields:
-
-- `device_id` (PK): Unique device identifier (business key)
-- `tenant_id`: Multi-tenant support (nullable for Phase-1)
-- `device_name`: Human-readable name
-- `device_type`: Device category (e.g., bulb, compressor)
-- `manufacturer`: Device manufacturer
-- `model`: Device model
-- `location`: Physical location
-- `status`: Device status (active, inactive, maintenance, error)
-- `metadata_json`: Additional metadata as JSON
-- `created_at`: Creation timestamp
-- `updated_at`: Last update timestamp
-- `deleted_at`: Soft delete timestamp
-
-## Configuration
-
-Configuration is managed through environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `mysql+aiomysql://energy:energy@localhost:3306/energy_device_db` | MySQL connection string |
-| `DATABASE_POOL_SIZE` | `10` | Connection pool size |
-| `LOG_LEVEL` | `INFO` | Logging level |
-| `ENVIRONMENT` | `development` | Environment (development/production) |
-| `APP_VERSION` | `1.0.0` | Application version |
-
-## Architecture
-
-### Layer Structure
-
-1. **API Layer** (`app/api/`): FastAPI route handlers, request validation
-2. **Service Layer** (`app/services/`): Business logic
-3. **Repository Layer** (`app/repositories/`): Data access abstraction
-4. **Model Layer** (`app/models/`): SQLAlchemy ORM models
-
-### Multi-tenancy Support
-
-The service is designed with multi-tenancy in mind:
-- `tenant_id` field is present on Device model
-- Repository methods accept optional `tenant_id` parameter
-- API endpoints accept `tenant_id` as query parameter
-
-For Phase-1, tenant filtering is optional (nullable). In future phases, this can be enforced via middleware or authentication context.
-
-## License
-
-Proprietary - Energy Intelligence Platform
+## Storage / Migrations
+- Uses MySQL + Alembic migrations.
+- Alembic version table in this service is namespaced (`alembic_version_device`) for single-DB deployments.

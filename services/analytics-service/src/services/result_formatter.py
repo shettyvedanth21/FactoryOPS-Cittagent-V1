@@ -249,6 +249,7 @@ class ResultFormatter:
         job_id: str,
         analysis_type: str,
         device_results: List[Dict[str, Any]],
+        child_job_map: Dict[str, str] | None = None,
     ) -> Dict[str, Any]:
         if not device_results:
             return {
@@ -294,6 +295,7 @@ class ResultFormatter:
                     "total_anomalies": summary.get("total_anomalies", 0),
                     "anomaly_rate_pct": summary.get("anomaly_rate_pct", 0),
                     "maintenance_urgency": summary.get("maintenance_urgency"),
+                    "child_job_id": (child_job_map or {}).get(device_id),
                 }
             )
 

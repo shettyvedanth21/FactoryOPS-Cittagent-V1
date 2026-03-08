@@ -33,14 +33,53 @@ const SCOPE_OPTIONS = [
   { value: "selected_devices", label: "Selected Devices" },
 ];
 
+const RULE_TYPE_OPTIONS = [
+  { value: "threshold", label: "Threshold Rule" },
+  { value: "time_based", label: "Time-Based Rule" },
+];
+
+const COOLDOWN_OPTIONS = [
+  { value: "5", label: "5 minutes" },
+  { value: "15", label: "15 minutes" },
+  { value: "30", label: "30 minutes" },
+  { value: "60", label: "1 hour" },
+  { value: "120", label: "2 hours" },
+  { value: "240", label: "4 hours" },
+  { value: "1440", label: "24 hours" },
+  { value: "no_repeat", label: "No repeat" },
+];
+
 const METRIC_LABELS: Record<string, string> = {
   power: "Power", voltage: "Voltage", current: "Current", temperature: "Temperature",
   pressure: "Pressure", humidity: "Humidity", vibration: "Vibration", frequency: "Frequency",
   power_factor: "Power Factor", speed: "Speed", torque: "Torque", oil_pressure: "Oil Pressure",
 };
 
-function formatPropertyLabel(property: string): string {
-  return METRIC_LABELS[property] || property.charAt(0).toUpperCase() + property.slice(1).replace(/_/g, ' ');
+function formatPropertyLabel(property: unknown): string {
+  if (typeof property !== "string") {
+    return "Unknown";
+  }
+  const normalized = property.trim();
+  if (!normalized) {
+    return "Unknown";
+  }
+  if (METRIC_LABELS[normalized]) {
+    return METRIC_LABELS[normalized];
+  }
+  return normalized
+    .replace(/_/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatCooldownLabel(rule: Rule): string {
+  if (rule.cooldownMode === "no_repeat") return "No repeat";
+  const mins = rule.cooldownMinutes ?? 15;
+  if (mins < 60) return `${mins}m`;
+  if (mins % 60 === 0) return `${mins / 60}h`;
+  return `${mins}m`;
 }
 
 export default function RulesPage() {
@@ -57,22 +96,30 @@ export default function RulesPage() {
   
   const [formData, setFormData] = useState<{
     ruleName: string;
+    ruleType: "threshold" | "time_based";
     scope: "all_devices" | "selected_devices";
     selectedDevices: string[];
     property: string;
     condition: string;
     threshold: string;
+    timeWindowStart: string;
+    timeWindowEnd: string;
+    cooldown: string;
     enabled: boolean;
     email: boolean;
     whatsapp: boolean;
     telegram: boolean;
   }>({
     ruleName: "",
+    ruleType: "threshold",
     scope: "all_devices",
     selectedDevices: [],
     property: "",
     condition: ">",
     threshold: "",
+    timeWindowStart: "20:00",
+    timeWindowEnd: "06:00",
+    cooldown: "15",
     enabled: true,
     email: false,
     whatsapp: false,
@@ -109,7 +156,9 @@ export default function RulesPage() {
 
       if (propsResult.status === "fulfilled") {
         setAllDeviceProperties(propsResult.value.devices);
-        const allProps = propsResult.value.all_properties;
+        const allProps = (propsResult.value.all_properties || []).filter(
+          (p: unknown): p is string => typeof p === "string" && p.trim().length > 0
+        );
         setAvailableProperties(allProps.map(p => ({
           value: p,
           label: formatPropertyLabel(p)
@@ -161,7 +210,9 @@ export default function RulesPage() {
         if (activeDevices.length > 0) {
           try {
             const common = await getCommonProperties(activeDevices);
-            const props = common.properties.map(p => ({
+            const props = (common.properties || [])
+              .filter((p: unknown): p is string => typeof p === "string" && p.trim().length > 0)
+              .map(p => ({
               value: p,
               label: formatPropertyLabel(p)
             }));
@@ -179,7 +230,9 @@ export default function RulesPage() {
       } else if (formData.selectedDevices.length === 1) {
         try {
           const deviceId = formData.selectedDevices[0];
-          const props = await getDeviceProperties(deviceId);
+          const props = (await getDeviceProperties(deviceId)).filter(
+            (p: unknown): p is string => typeof p === "string" && p.trim().length > 0
+          );
           const formattedProps = props.map(p => ({
             value: p,
             label: formatPropertyLabel(p)
@@ -199,10 +252,12 @@ export default function RulesPage() {
       } else if (formData.selectedDevices.length > 1) {
         try {
           const common = await getCommonProperties(formData.selectedDevices);
-          const props = common.properties.map(p => ({
-            value: p,
-            label: formatPropertyLabel(p)
-          }));
+            const props = (common.properties || [])
+              .filter((p: unknown): p is string => typeof p === "string" && p.trim().length > 0)
+              .map(p => ({
+              value: p,
+              label: formatPropertyLabel(p)
+            }));
           setAvailableProperties(props);
           if (!props.find(p => p.value === formData.property)) {
             setFormData(prev => ({ 
@@ -225,8 +280,16 @@ export default function RulesPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!formData.property) {
+    if (formData.ruleType === "threshold" && !formData.property) {
       alert("Please select a property");
+      return;
+    }
+    if (formData.ruleType === "threshold" && (formData.threshold === "" || Number.isNaN(Number(formData.threshold)))) {
+      alert("Please provide a valid threshold value");
+      return;
+    }
+    if (formData.ruleType === "time_based" && (!formData.timeWindowStart || !formData.timeWindowEnd)) {
+      alert("Please provide restricted time window");
       return;
     }
     
@@ -238,13 +301,19 @@ export default function RulesPage() {
     try {
       await createRule({
         ruleName: formData.ruleName,
-        property: formData.property,
-        condition: formData.condition,
-        threshold: parseFloat(formData.threshold),
+        ruleType: formData.ruleType,
+        property: formData.ruleType === "threshold" ? formData.property : undefined,
+        condition: formData.ruleType === "threshold" ? formData.condition : undefined,
+        threshold: formData.ruleType === "threshold" ? parseFloat(formData.threshold) : undefined,
+        timeWindowStart: formData.ruleType === "time_based" ? formData.timeWindowStart : undefined,
+        timeWindowEnd: formData.ruleType === "time_based" ? formData.timeWindowEnd : undefined,
+        timezone: "Asia/Kolkata",
+        timeCondition: formData.ruleType === "time_based" ? "running_in_window" : undefined,
         scope: formData.scope,
         deviceIds: formData.scope === "selected_devices" ? formData.selectedDevices : [],
         notificationChannels: channels,
-        cooldownMinutes: 5,
+        cooldownMode: formData.cooldown === "no_repeat" ? "no_repeat" : "interval",
+        cooldownMinutes: formData.cooldown === "no_repeat" ? 0 : Number(formData.cooldown),
       });
       
       setShowForm(false);
@@ -279,11 +348,15 @@ export default function RulesPage() {
   const resetForm = () => {
     setFormData({
       ruleName: "",
+      ruleType: "threshold",
       scope: "all_devices",
       selectedDevices: [],
       property: availableProperties.length > 0 ? availableProperties[0].value : "",
       condition: ">",
       threshold: "",
+      timeWindowStart: "20:00",
+      timeWindowEnd: "06:00",
+      cooldown: "15",
       enabled: true,
       email: false,
       whatsapp: false,
@@ -332,11 +405,18 @@ export default function RulesPage() {
                     onChange={(e) => setFormData({ ...formData, ruleName: e.target.value })}
                     required
                   />
+
+                  <Select
+                    label="Rule Type"
+                    value={formData.ruleType}
+                    onChange={(e) => setFormData({ ...formData, ruleType: e.target.value as "threshold" | "time_based" })}
+                    options={RULE_TYPE_OPTIONS}
+                  />
                   
                   <Select
                     label="Scope"
                     value={formData.scope}
-                    onChange={(e) => setFormData({ ...formData, scope: e.target.value as any, selectedDevices: [] })}
+                    onChange={(e) => setFormData({ ...formData, scope: e.target.value as "all_devices" | "selected_devices", selectedDevices: [] })}
                     options={SCOPE_OPTIONS}
                   />
                   
@@ -375,44 +455,84 @@ export default function RulesPage() {
                       </div>
                     </div>
                   )}
-                  
-                  {propertiesLoading ? (
-                    <div className="md:col-span-2">
-                      <p className="text-sm font-medium text-slate-700 mb-1">Property</p>
-                      <div className="text-sm text-slate-500 py-2">Loading properties...</div>
-                    </div>
-                  ) : availableProperties.length === 0 ? (
-                    <div className="md:col-span-2">
-                      <p className="text-sm font-medium text-slate-700 mb-1">Property</p>
-                      <div className="text-sm text-red-500 py-2">
-                        {formData.scope === "selected_devices" && formData.selectedDevices.length === 0
-                          ? "Select devices to see available properties"
-                          : "No common properties available. Devices may have different telemetry fields."}
-                      </div>
-                    </div>
+
+                  {formData.ruleType === "threshold" ? (
+                    <>
+                      {propertiesLoading ? (
+                        <div className="md:col-span-2">
+                          <p className="text-sm font-medium text-slate-700 mb-1">Property</p>
+                          <div className="text-sm text-slate-500 py-2">Loading properties...</div>
+                        </div>
+                      ) : availableProperties.length === 0 ? (
+                        <div className="md:col-span-2">
+                          <p className="text-sm font-medium text-slate-700 mb-1">Property</p>
+                          <div className="text-sm text-red-500 py-2">
+                            {formData.scope === "selected_devices" && formData.selectedDevices.length === 0
+                              ? "Select devices to see available properties"
+                              : "No common properties available. Devices may have different telemetry fields."}
+                          </div>
+                        </div>
+                      ) : (
+                        <Select
+                          label="Property"
+                          value={formData.property}
+                          onChange={(e) => setFormData({ ...formData, property: e.target.value })}
+                          options={availableProperties}
+                        />
+                      )}
+
+                      <Select
+                        label="Condition"
+                        value={formData.condition}
+                        onChange={(e) => setFormData({ ...formData, condition: e.target.value })}
+                        options={CONDITION_OPTIONS}
+                      />
+
+                      <Input
+                        label="Threshold Value"
+                        type="number"
+                        step="0.01"
+                        value={formData.threshold}
+                        onChange={(e) => setFormData({ ...formData, threshold: e.target.value })}
+                        required
+                      />
+                    </>
                   ) : (
-                    <Select
-                      label="Property"
-                      value={formData.property}
-                      onChange={(e) => setFormData({ ...formData, property: e.target.value })}
-                      options={availableProperties}
-                    />
+                    <>
+                      <Input
+                        label="Parameter"
+                        value="Power Status (running)"
+                        onChange={() => undefined}
+                        disabled
+                      />
+                      <Input
+                        label="Restricted From (IST)"
+                        type="time"
+                        value={formData.timeWindowStart}
+                        onChange={(e) => setFormData({ ...formData, timeWindowStart: e.target.value })}
+                        required
+                      />
+                      <Input
+                        label="Restricted To (IST)"
+                        type="time"
+                        value={formData.timeWindowEnd}
+                        onChange={(e) => setFormData({ ...formData, timeWindowEnd: e.target.value })}
+                        required
+                      />
+                      <Input
+                        label="Timezone"
+                        value="Asia/Kolkata"
+                        onChange={() => undefined}
+                        disabled
+                      />
+                    </>
                   )}
-                  
+
                   <Select
-                    label="Condition"
-                    value={formData.condition}
-                    onChange={(e) => setFormData({ ...formData, condition: e.target.value })}
-                    options={CONDITION_OPTIONS}
-                  />
-                  
-                  <Input
-                    label="Threshold Value"
-                    type="number"
-                    step="0.01"
-                    value={formData.threshold}
-                    onChange={(e) => setFormData({ ...formData, threshold: e.target.value })}
-                    required
+                    label="Cooldown"
+                    value={formData.cooldown}
+                    onChange={(e) => setFormData({ ...formData, cooldown: e.target.value })}
+                    options={COOLDOWN_OPTIONS}
                   />
                 </div>
                 
@@ -438,7 +558,13 @@ export default function RulesPage() {
                 </div>
                 
                 <div className="flex gap-3 pt-4">
-                  <Button type="submit" disabled={propertiesLoading || availableProperties.length === 0}>
+                  <Button
+                    type="submit"
+                    disabled={
+                      formData.ruleType === "threshold" &&
+                      (propertiesLoading || availableProperties.length === 0)
+                    }
+                  >
                     Create Rule
                   </Button>
                   <Button
@@ -494,9 +620,13 @@ export default function RulesPage() {
                     {rules.map((rule) => (
                       <TableRow key={rule.ruleId}>
                         <TableCell className="font-medium">{rule.ruleName}</TableCell>
-                        <TableCell className="capitalize">{formatPropertyLabel(rule.property)}</TableCell>
+                        <TableCell className="capitalize">
+                          {rule.ruleType === "time_based" ? "Power Status (running)" : formatPropertyLabel(rule.property || "N/A")}
+                        </TableCell>
                         <TableCell>
-                          {getConditionLabel(rule.condition)} {rule.threshold}
+                          {rule.ruleType === "time_based"
+                            ? `${rule.timeWindowStart ?? "--:--"} - ${rule.timeWindowEnd ?? "--:--"} IST`
+                            : `${getConditionLabel(rule.condition || "=")} ${rule.threshold ?? "-"}`}
                         </TableCell>
                         <TableCell>
                           <span className="text-sm text-slate-500">
@@ -504,7 +634,15 @@ export default function RulesPage() {
                           </span>
                         </TableCell>
                         <TableCell>
-                          <StatusBadge status={rule.status} />
+                          <div className="flex items-center gap-2">
+                            <StatusBadge status={rule.status} />
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                              {rule.ruleType === "time_based" ? "Time-Based" : "Threshold"}
+                            </span>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+                              {formatCooldownLabel(rule)}
+                            </span>
+                          </div>
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-2">
@@ -519,7 +657,7 @@ export default function RulesPage() {
                               {rule.status === "active" ? "Pause" : "Enable"}
                             </button>
                             <Link
-                              href={`/machines/${rule.deviceIds[0] || devices[0]?.id || 'D1'}`}
+                              href={`/rules/${rule.ruleId}`}
                               className="text-sm text-blue-600 hover:text-blue-800 px-3 py-1 hover:bg-blue-50 rounded"
                             >
                               View

@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     mysql_host: str = Field(default="mysql")
     mysql_port: int = Field(default=3306)
-    mysql_database: str = Field(default="energy_analytics_db")
+    mysql_database: str = Field(default="ai_factoryops")
     mysql_user: str = Field(default="energy")
     mysql_password: str = Field(default="energy")
     mysql_pool_size: int = Field(default=10)

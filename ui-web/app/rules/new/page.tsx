@@ -22,11 +22,40 @@ const notificationOptions = [
   { value: "telegram", label: "Telegram" },
 ];
 
+const ruleTypeOptions = [
+  { value: "threshold", label: "Threshold Rule" },
+  { value: "time_based", label: "Time-Based Rule" },
+];
+
+const cooldownOptions = [
+  { value: "5", label: "5 minutes" },
+  { value: "15", label: "15 minutes" },
+  { value: "30", label: "30 minutes" },
+  { value: "60", label: "1 hour" },
+  { value: "120", label: "2 hours" },
+  { value: "240", label: "4 hours" },
+  { value: "1440", label: "24 hours" },
+  { value: "no_repeat", label: "No repeat" },
+];
+
 const METRIC_LABELS: Record<string, string> = {
   power: "Power", voltage: "Voltage", current: "Current", temperature: "Temperature",
   pressure: "Pressure", humidity: "Humidity", vibration: "Vibration", frequency: "Frequency",
   power_factor: "Power Factor", speed: "Speed", torque: "Torque", oil_pressure: "Oil Pressure",
 };
+
+function formatFieldLabel(field: unknown): string {
+  if (typeof field !== "string") return "Unknown";
+  const normalized = field.trim();
+  if (!normalized) return "Unknown";
+  if (METRIC_LABELS[normalized]) return METRIC_LABELS[normalized];
+  return normalized
+    .replace(/_/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 function CreateRuleContent() {
   const router = useRouter();
@@ -34,9 +63,13 @@ function CreateRuleContent() {
   const deviceIdFromUrl = searchParams.get("device_id") ?? "D1";
 
   const [ruleName, setRuleName] = useState("");
+  const [ruleType, setRuleType] = useState<"threshold" | "time_based">("threshold");
   const [property, setProperty] = useState("");
   const [condition, setCondition] = useState(">");
   const [threshold, setThreshold] = useState("");
+  const [timeWindowStart, setTimeWindowStart] = useState("20:00");
+  const [timeWindowEnd, setTimeWindowEnd] = useState("06:00");
+  const [cooldown, setCooldown] = useState("15");
   const [notificationChannels, setNotificationChannels] = useState<string[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [availableProperties, setAvailableProperties] = useState<{value: string, label: string}[]>([]);
@@ -49,9 +82,11 @@ function CreateRuleContent() {
     async function fetchProperties() {
       try {
         const fields = await getDeviceFields(deviceIdFromUrl);
-        const properties = fields.map(field => ({
+        const properties = fields
+          .filter((field): field is string => typeof field === "string" && field.trim().length > 0)
+          .map(field => ({
           value: field,
-          label: METRIC_LABELS[field] || field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, ' ')
+          label: formatFieldLabel(field)
         }));
         setAvailableProperties(properties);
         if (fields.length > 0 && !property) {
@@ -91,7 +126,7 @@ function CreateRuleContent() {
       return;
     }
 
-    if (threshold === "" || isNaN(Number(threshold))) {
+    if (ruleType === "threshold" && (threshold === "" || isNaN(Number(threshold)))) {
       setError("Threshold must be a valid number");
       return;
     }
@@ -107,12 +142,18 @@ function CreateRuleContent() {
     try {
       const created = await createRule({
         ruleName: ruleName.trim(),
+        ruleType,
         scope: "selected_devices",
-        property,
-        condition,
-        threshold: Number(threshold),
+        property: ruleType === "threshold" ? property : undefined,
+        condition: ruleType === "threshold" ? condition : undefined,
+        threshold: ruleType === "threshold" ? Number(threshold) : undefined,
+        timeWindowStart: ruleType === "time_based" ? timeWindowStart : undefined,
+        timeWindowEnd: ruleType === "time_based" ? timeWindowEnd : undefined,
+        timezone: "Asia/Kolkata",
+        timeCondition: ruleType === "time_based" ? "running_in_window" : undefined,
         notificationChannels,
-        cooldownMinutes: 15,
+        cooldownMode: cooldown === "no_repeat" ? "no_repeat" : "interval",
+        cooldownMinutes: cooldown === "no_repeat" ? 0 : Number(cooldown),
         deviceIds: [deviceIdFromUrl],
       });
 
@@ -177,12 +218,45 @@ function CreateRuleContent() {
 
           <div className="space-y-2">
             <label
+              htmlFor="ruleType"
+              className="block text-sm font-medium text-zinc-700 dark:text-zinc-300"
+            >
+              Rule Type
+            </label>
+            <select
+              id="ruleType"
+              value={ruleType}
+              onChange={(e) => setRuleType(e.target.value as "threshold" | "time_based")}
+              className="w-full rounded-md border border-zinc-300 dark:border-zinc-700
+                         bg-white dark:bg-zinc-900
+                         px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100
+                         focus:outline-none focus:ring-2 focus:ring-blue-500"
+              disabled={loading}
+            >
+              {ruleTypeOptions.map((r) => (
+                <option key={r.value} value={r.value}>
+                  {r.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-2">
+            <label
               htmlFor="property"
               className="block text-sm font-medium text-zinc-700 dark:text-zinc-300"
             >
               Property
             </label>
-            {propertiesLoading ? (
+            {ruleType === "time_based" ? (
+              <input
+                value="Power Status (running)"
+                disabled
+                className="w-full rounded-md border border-zinc-300 dark:border-zinc-700
+                         bg-zinc-50 dark:bg-zinc-800
+                         px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300"
+              />
+            ) : propertiesLoading ? (
               <div className="w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-3 py-2 text-sm text-zinc-500">
                 Loading properties...
               </div>
@@ -213,53 +287,94 @@ function CreateRuleContent() {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label
-                htmlFor="condition"
-                className="block text-sm font-medium text-zinc-700 dark:text-zinc-300"
-              >
-                Condition
-              </label>
-              <select
-                id="condition"
-                value={condition}
-                onChange={(e) => setCondition(e.target.value)}
-                className="w-full rounded-md border border-zinc-300 dark:border-zinc-700
+          {ruleType === "threshold" ? (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label
+                  htmlFor="condition"
+                  className="block text-sm font-medium text-zinc-700 dark:text-zinc-300"
+                >
+                  Condition
+                </label>
+                <select
+                  id="condition"
+                  value={condition}
+                  onChange={(e) => setCondition(e.target.value)}
+                  className="w-full rounded-md border border-zinc-300 dark:border-zinc-700
                            bg-white dark:bg-zinc-900
                            px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100
                            focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={loading}
-              >
-                {conditions.map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+                  disabled={loading}
+                >
+                  {conditions.map((c) => (
+                    <option key={c.value} value={c.value}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            <div className="space-y-2">
-              <label
-                htmlFor="threshold"
-                className="block text-sm font-medium text-zinc-700 dark:text-zinc-300"
-              >
-                Threshold
-              </label>
-              <input
-                type="number"
-                id="threshold"
-                value={threshold}
-                onChange={(e) => setThreshold(e.target.value)}
-                className="w-full rounded-md border border-zinc-300 dark:border-zinc-700
+              <div className="space-y-2">
+                <label
+                  htmlFor="threshold"
+                  className="block text-sm font-medium text-zinc-700 dark:text-zinc-300"
+                >
+                  Threshold
+                </label>
+                <input
+                  type="number"
+                  id="threshold"
+                  value={threshold}
+                  onChange={(e) => setThreshold(e.target.value)}
+                  className="w-full rounded-md border border-zinc-300 dark:border-zinc-700
                            bg-white dark:bg-zinc-900
                            px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100
                            focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Enter threshold"
-                disabled={loading}
-                step="any"
-              />
+                  placeholder="Enter threshold"
+                  disabled={loading}
+                  step="any"
+                />
+              </div>
             </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Restricted From (IST)</label>
+                <input
+                  type="time"
+                  value={timeWindowStart}
+                  onChange={(e) => setTimeWindowStart(e.target.value)}
+                  className="w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={loading}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Restricted To (IST)</label>
+                <input
+                  type="time"
+                  value={timeWindowEnd}
+                  onChange={(e) => setTimeWindowEnd(e.target.value)}
+                  className="w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={loading}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Cooldown</label>
+            <select
+              value={cooldown}
+              onChange={(e) => setCooldown(e.target.value)}
+              className="w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              disabled={loading}
+            >
+              {cooldownOptions.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="space-y-2">

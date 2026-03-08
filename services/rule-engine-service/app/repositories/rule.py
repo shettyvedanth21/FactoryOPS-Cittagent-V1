@@ -319,6 +319,24 @@ class AlertRepository:
         rows = result.all()
         return {str(status): int(count) for status, count in rows}
 
+    async def latest_for_rule_device(
+        self,
+        *,
+        rule_id: str,
+        device_id: str,
+    ) -> Optional[Alert]:
+        """Return latest alert for a rule+device pair."""
+        result = await self._session.execute(
+            select(Alert)
+            .where(
+                Alert.rule_id == rule_id,
+                Alert.device_id == device_id,
+            )
+            .order_by(Alert.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
 
 class ActivityEventRepository:
     """Repository for activity event operations."""

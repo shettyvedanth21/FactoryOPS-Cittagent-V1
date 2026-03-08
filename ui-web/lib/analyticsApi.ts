@@ -138,6 +138,7 @@ export interface FleetFormattedResult {
     total_anomalies?: number;
     anomaly_rate_pct?: number;
     maintenance_urgency?: string;
+    child_job_id?: string;
   }>;
 }
 

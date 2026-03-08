@@ -11,7 +11,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from config import get_settings
@@ -86,6 +88,45 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "VALIDATION_ERROR",
+            "message": "Invalid request payload",
+            "code": "VALIDATION_ERROR",
+            "details": exc.errors(),
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if isinstance(exc.detail, dict):
+        payload = dict(exc.detail)
+        payload.setdefault("code", payload.get("error", "HTTP_ERROR"))
+        payload.setdefault("message", "Request failed")
+        return JSONResponse(status_code=exc.status_code, content=payload)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": "HTTP_ERROR", "message": str(exc.detail), "code": "HTTP_ERROR"},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception in data-export-service")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "INTERNAL_ERROR",
+            "message": "Unexpected server error",
+            "code": "INTERNAL_ERROR",
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     settings = get_settings()
@@ -140,7 +181,10 @@ async def run_export(req: ExportRequest = Body(...)):
         logger.exception("On-demand export failed")
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail={
+                "error": "EXPORT_TRIGGER_FAILED",
+                "message": "Failed to trigger export",
+            },
         )
 
 

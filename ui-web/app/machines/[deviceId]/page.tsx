@@ -7,6 +7,12 @@ import Link from "next/link";
 import {
   getDeviceById,
   Device,
+  getIdleConfig,
+  saveIdleConfig,
+  getCurrentState,
+  getIdleStats,
+  CurrentState,
+  IdleStats,
   getShifts,
   createShift,
   deleteShift,
@@ -210,6 +216,31 @@ function HealthScoreCircle({ healthScore, onClick }: { healthScore: HealthScore 
       </div>
     </div>
   );
+}
+
+function LoadStateBadge({ state }: { state: "running" | "idle" | "unloaded" | "unknown" }) {
+  const cfg: Record<string, { label: string; className: string }> = {
+    running: { label: "In Load", className: "bg-emerald-100 text-emerald-800 border-emerald-200" },
+    idle: { label: "Idle", className: "bg-amber-100 text-amber-800 border-amber-200" },
+    unloaded: { label: "Unloaded", className: "bg-orange-100 text-orange-800 border-orange-200" },
+    unknown: { label: "Unknown", className: "bg-slate-100 text-slate-700 border-slate-200" },
+  };
+  const item = cfg[state] || cfg.unknown;
+  return (
+    <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${item.className}`}>
+      {item.label}
+    </span>
+  );
+}
+
+function getEffectiveLoadState(
+  runtimeStatus: string | undefined,
+  rawLoadState: "running" | "idle" | "unloaded" | "unknown" | undefined,
+): "running" | "idle" | "unloaded" | "unknown" {
+  if ((runtimeStatus || "").toLowerCase() !== "running") {
+    return "unknown";
+  }
+  return rawLoadState || "unknown";
 }
 
 function getEfficiencyStatus(rawScore: number): { label: string; color: string; bgColor: string } {
@@ -545,6 +576,11 @@ export default function MachineDashboardPage() {
   const [uptime, setUptime] = useState<UptimeData | null>(null);
   const [healthConfigs, setHealthConfigs] = useState<HealthConfig[]>([]);
   const [healthScore, setHealthScore] = useState<HealthScore | null>(null);
+  const [currentState, setCurrentState] = useState<CurrentState | null>(null);
+  const [idleStats, setIdleStats] = useState<IdleStats | null>(null);
+  const [idleThresholdInput, setIdleThresholdInput] = useState<string>("");
+  const [idleSaveMessage, setIdleSaveMessage] = useState<string>("");
+  const [idleSaving, setIdleSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "telemetry" | "parameters" | "rules">("overview");
@@ -564,6 +600,8 @@ export default function MachineDashboardPage() {
   });
   const pollingInterval = useRef<NodeJS.Timeout | null>(null);
   const telemetryPollingInterval = useRef<NodeJS.Timeout | null>(null);
+  const currentStatePollingInterval = useRef<NodeJS.Timeout | null>(null);
+  const idleStatsPollingInterval = useRef<NodeJS.Timeout | null>(null);
   const latestTelemetryTimestampRef = useRef<string | null>(null);
 
   const fetchData = async (isInitial = false) => {
@@ -665,14 +703,52 @@ export default function MachineDashboardPage() {
     }
   };
 
+  const loadIdleConfig = async () => {
+    try {
+      const config = await getIdleConfig(deviceId);
+      setIdleThresholdInput(
+        config.idle_current_threshold !== null && config.idle_current_threshold !== undefined
+          ? String(config.idle_current_threshold)
+          : ""
+      );
+    } catch (err) {
+      console.error("Failed to load idle config:", err);
+    }
+  };
+
+  const loadCurrentState = async () => {
+    try {
+      const state = await getCurrentState(deviceId);
+      setCurrentState(state);
+    } catch (err) {
+      console.error("Failed to load current state:", err);
+    }
+  };
+
+  const loadIdleStats = async () => {
+    try {
+      const stats = await getIdleStats(deviceId);
+      setIdleStats(stats);
+    } catch (err) {
+      console.error("Failed to load idle stats:", err);
+    }
+  };
+
   useEffect(() => {
     if (!deviceId) return;
     fetchData(true);
+    loadIdleConfig();
+    loadCurrentState();
+    loadIdleStats();
     pollingInterval.current = setInterval(() => fetchData(false), 10000);
     telemetryPollingInterval.current = setInterval(() => pollLatestTelemetry(), 1000);
+    currentStatePollingInterval.current = setInterval(() => loadCurrentState(), 30000);
+    idleStatsPollingInterval.current = setInterval(() => loadIdleStats(), 60000);
     return () => {
       if (pollingInterval.current) clearInterval(pollingInterval.current);
       if (telemetryPollingInterval.current) clearInterval(telemetryPollingInterval.current);
+      if (currentStatePollingInterval.current) clearInterval(currentStatePollingInterval.current);
+      if (idleStatsPollingInterval.current) clearInterval(idleStatsPollingInterval.current);
     };
   }, [deviceId]);
 
@@ -723,6 +799,25 @@ export default function MachineDashboardPage() {
       setSelectedMetric("");
       fetchData(false);
     } catch (err) { alert("Failed: " + (err as Error).message); }
+  };
+
+  const handleSaveIdleThreshold = async () => {
+    const parsed = Number(idleThresholdInput);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      alert("Idle threshold must be a positive number.");
+      return;
+    }
+    try {
+      setIdleSaving(true);
+      setIdleSaveMessage("");
+      await saveIdleConfig(deviceId, parsed);
+      await Promise.all([loadIdleConfig(), loadCurrentState(), loadIdleStats()]);
+      setIdleSaveMessage(`Saved: Below ${parsed.toFixed(2)}A = Idle Running`);
+    } catch (err) {
+      alert("Failed: " + (err as Error).message);
+    } finally {
+      setIdleSaving(false);
+    }
   };
 
   const handleMarkAllRead = async () => {
@@ -797,6 +892,9 @@ export default function MachineDashboardPage() {
                   )}
                 </button>
                 <StatusBadge status={machine.runtime_status} />
+                <LoadStateBadge
+                  state={getEffectiveLoadState(machine.runtime_status, currentState?.state)}
+                />
               </div>
             </div>
 
@@ -868,6 +966,45 @@ export default function MachineDashboardPage() {
 
             <div className="mt-4 text-sm text-slate-600">
               <span className="font-medium text-slate-700">Location:</span> {machine.location || "—"}
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4">
+              <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">Idle Running Waste</p>
+              {!idleStats?.threshold_configured ? (
+                <p className="text-sm text-slate-600 mt-2">
+                  Set idle threshold in Parameter Configuration to enable this widget.
+                </p>
+              ) : (
+                <>
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="rounded-xl border border-slate-200 p-3">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide">Today Idle Time</p>
+                      <p className="text-lg font-semibold text-slate-900 mt-1">{idleStats?.today?.idle_duration_label || "0 min"}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 p-3">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide">Today Idle Cost</p>
+                      <p className="text-lg font-semibold text-slate-900 mt-1">
+                        {idleStats?.tariff_configured
+                          ? `${idleStats.today?.currency || "INR"} ${Number(idleStats.today?.idle_cost || 0).toFixed(2)}`
+                          : "Set tariff in Settings"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 p-3">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide">Monthly Idle Cost</p>
+                      <p className="text-lg font-semibold text-slate-900 mt-1">
+                        {idleStats?.tariff_configured
+                          ? `${idleStats.month?.currency || "INR"} ${Number(idleStats.month?.idle_cost || 0).toFixed(2)}`
+                          : "Set tariff in Settings"}
+                      </p>
+                    </div>
+                  </div>
+                  {idleStats?.pf_estimated && (
+                    <p className="text-xs text-amber-700 mt-3">
+                      Power factor unavailable in telemetry for part of the period. Cost estimated with PF = 1.0.
+                    </p>
+                  )}
+                </>
+              )}
             </div>
 
             {showAlertHistory && (
@@ -1130,6 +1267,58 @@ export default function MachineDashboardPage() {
                 ) : (
                   <div className="text-center py-8 text-slate-500">No telemetry parameters available</div>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Idle Running Configuration</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <p className="text-sm text-slate-600">
+                    If current is below this value (but not zero), the machine is considered idle.
+                  </p>
+                  <div className="flex flex-col md:flex-row md:items-end gap-3">
+                    <div className="w-full md:w-72">
+                      <label className="block text-sm font-medium mb-1">Idle Current Threshold (A)</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={idleThresholdInput}
+                        onChange={(e) => setIdleThresholdInput(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md"
+                        placeholder="e.g. 5.00"
+                      />
+                    </div>
+                    <Button onClick={handleSaveIdleThreshold} disabled={idleSaving}>
+                      {idleSaving ? "Saving..." : "Save Threshold"}
+                    </Button>
+                  </div>
+                  {idleSaveMessage && (
+                    <p className="text-sm text-emerald-700">{idleSaveMessage}</p>
+                  )}
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
+                    <p>
+                      Auto-detected current field:{" "}
+                      <span className="font-semibold text-slate-800">
+                        {currentState?.current_field || "Not detected"}
+                      </span>
+                    </p>
+                    <p>
+                      Device type:{" "}
+                      <span className="font-semibold text-slate-800 capitalize">
+                        {machine.data_source_type || "metered"}
+                      </span>
+                    </p>
+                    {!currentState?.current_field && (
+                      <p className="text-amber-700">
+                        No current parameter found in telemetry. Idle detection will remain unavailable until current data is received.
+                      </p>
+                    )}
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </div>

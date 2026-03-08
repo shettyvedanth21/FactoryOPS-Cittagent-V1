@@ -8,6 +8,7 @@ const sidebarItems = [
   { label: "Machines", href: "/machines", icon: CpuIcon },
   { label: "Analytics", href: "/analytics", icon: ChartIcon },
   { label: "Reports", href: "/reports", icon: DocumentIcon },
+  { label: "Waste Analysis", href: "/waste-analysis", icon: FlameIcon },
   { label: "Rules", href: "/rules", icon: ShieldIcon },
   { label: "Settings", href: "/settings", icon: SettingsIcon },
 ];
@@ -167,6 +168,20 @@ function SettingsIcon({ className }: { className?: string }) {
         strokeWidth={2}
         d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
       />
+    </svg>
+  );
+}
+
+function FlameIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M12 3c.6 2.5-.4 4.2-2 5.7-1.5 1.5-2.5 3-2.5 5.1A4.5 4.5 0 0012 18a4.5 4.5 0 004.5-4.2c0-2.8-1.8-4.2-3.4-5.6C12 7.4 11.6 5.8 12 3z"
+      />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 22a7 7 0 007-7" />
     </svg>
   );
 }

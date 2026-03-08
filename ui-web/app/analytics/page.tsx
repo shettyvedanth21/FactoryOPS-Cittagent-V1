@@ -99,6 +99,8 @@ function AnalyticsPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ResultType | null>(null);
   const [anomalyPage, setAnomalyPage] = useState(1);
+  const [fleetParentResult, setFleetParentResult] = useState<FleetFormattedResult | null>(null);
+  const [fleetNotice, setFleetNotice] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([getDevices(), getSupportedModels()])
@@ -150,6 +152,12 @@ function AnalyticsPageContent() {
           setProgress(100);
           const r = await getFormattedResults(jobId);
           setResult(r);
+          if (r.analysis_type === "fleet") {
+            setFleetParentResult(r);
+          } else {
+            setFleetParentResult(null);
+          }
+          setFleetNotice(null);
           setAnomalyPage(1);
           setStep(5);
         }
@@ -213,6 +221,8 @@ function AnalyticsPageContent() {
     setScreen("wizard");
     setStep(1);
     setResult(null);
+    setFleetParentResult(null);
+    setFleetNotice(null);
     setAnomalyPage(1);
     setJobId(null);
     setError(null);
@@ -224,7 +234,42 @@ function AnalyticsPageContent() {
     if (!result) return;
     if (result.analysis_type === "anomaly_detection") setScreen("anomaly");
     else if (result.analysis_type === "failure_prediction") setScreen("failure");
-    else setScreen("fleet");
+    else {
+      setFleetParentResult(result);
+      setFleetNotice(null);
+      setScreen("fleet");
+    }
+  };
+
+  const backToFleetSummary = () => {
+    if (!fleetParentResult) return;
+    setResult(fleetParentResult);
+    setFleetNotice(null);
+    setScreen("fleet");
+  };
+
+  const openFleetDevice = async (deviceId: string, childJobId?: string) => {
+    setFleetNotice(null);
+    if (!childJobId) {
+      setFleetNotice(`Detailed results are not available yet for ${deviceId}.`);
+      return;
+    }
+    try {
+      const childResult = await getFormattedResults(childJobId);
+      setResult(childResult);
+      if (childResult.analysis_type === "anomaly_detection") {
+        setAnomalyPage(1);
+        setScreen("anomaly");
+        return;
+      }
+      if (childResult.analysis_type === "failure_prediction") {
+        setScreen("failure");
+        return;
+      }
+      setFleetNotice(`Unsupported drilldown result for ${deviceId}.`);
+    } catch (e: any) {
+      setFleetNotice(e?.message ?? `Unable to open detailed view for ${deviceId}.`);
+    }
   };
 
   if (screen === "wizard") {
@@ -377,7 +422,12 @@ function AnalyticsPageContent() {
     return (
       <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "'DM Sans','Segoe UI',sans-serif", padding: 12 }}>
         <div style={{ maxWidth: 900, margin: "0 auto", display: "grid", gap: 8 }}>
-          <button onClick={reset} style={{ justifySelf: "start", padding: "5px 8px", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, background: "white", color: COLORS.text, cursor: "pointer", fontSize: 11 }}>New Analysis</button>
+          <div style={{ display: "flex", gap: 8, justifySelf: "start" }}>
+            <button onClick={reset} style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, background: "white", color: COLORS.text, cursor: "pointer", fontSize: 11 }}>New Analysis</button>
+            {fleetParentResult && (
+              <button onClick={backToFleetSummary} style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, background: "white", color: COLORS.text, cursor: "pointer", fontSize: 11 }}>Back to Fleet Summary</button>
+            )}
+          </div>
           {confidence && (
             <div style={{ background: COLORS.panel, border: `1px solid ${confidence.badge_color}`, borderRadius: 8, padding: 8, color: confidence.badge_color, fontWeight: 600, fontSize: 12 }}>
               {confidence.banner_text}
@@ -495,7 +545,12 @@ function AnalyticsPageContent() {
     return (
       <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "'DM Sans','Segoe UI',sans-serif", padding: 12 }}>
         <div style={{ maxWidth: 900, margin: "0 auto", display: "grid", gap: 8 }}>
-          <button onClick={reset} style={{ justifySelf: "start", padding: "5px 8px", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, background: "white", color: COLORS.text, cursor: "pointer", fontSize: 11 }}>New Analysis</button>
+          <div style={{ display: "flex", gap: 8, justifySelf: "start" }}>
+            <button onClick={reset} style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, background: "white", color: COLORS.text, cursor: "pointer", fontSize: 11 }}>New Analysis</button>
+            {fleetParentResult && (
+              <button onClick={backToFleetSummary} style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${COLORS.panelBorder}`, background: "white", color: COLORS.text, cursor: "pointer", fontSize: 11 }}>Back to Fleet Summary</button>
+            )}
+          </div>
           {confidence && (
             <div style={{ background: COLORS.panel, border: `1px solid ${confidence.badge_color}`, borderRadius: 8, padding: 8, color: confidence.badge_color, fontWeight: 600, fontSize: 12 }}>
               {confidence.banner_text}
@@ -612,12 +667,32 @@ function AnalyticsPageContent() {
           </div>
           <div style={panelStyle()}>
             <h3 style={titleStyle()}>Device Summaries</h3>
+            {fleetNotice && (
+              <div style={{ marginBottom: 8, color: COLORS.bad, fontSize: 11 }}>{fleetNotice}</div>
+            )}
             {result.device_summaries.map((d) => (
-              <div key={d.device_id} style={{ display: "grid", gridTemplateColumns: "1fr 100px 100px", gap: 8, padding: "6px 0", borderBottom: "1px solid #e2e8f0", fontSize: 11 }}>
+              <button
+                key={d.device_id}
+                onClick={() => openFleetDevice(d.device_id, d.child_job_id)}
+                style={{
+                  width: "100%",
+                  display: "grid",
+                  gridTemplateColumns: "1fr 100px 100px",
+                  gap: 8,
+                  padding: "6px 0",
+                  border: "none",
+                  borderBottom: "1px solid #e2e8f0",
+                  background: "transparent",
+                  color: COLORS.text,
+                  fontSize: 11,
+                  textAlign: "left",
+                  cursor: "pointer",
+                }}
+              >
                 <b>{d.device_id}</b>
                 <span>Health {d.health_score}%</span>
                 <span>{d.failure_risk || `${d.total_anomalies || 0} anomalies`}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>

@@ -1,150 +1,61 @@
 # Data Service
 
-Telemetry ingestion, validation, enrichment, and persistence service for the Energy Intelligence & Analytics Platform.
+Telemetry ingestion and query service for FactoryOPS.
 
-## Overview
+This service ingests MQTT telemetry, validates/enriches it, writes to InfluxDB, triggers rule evaluation, and exposes REST/WebSocket read APIs.
 
-The Data Service is a critical component that:
-- Subscribes to MQTT telemetry messages
-- Validates incoming data against strict schemas
-- Enriches data with device metadata
-- Persists to InfluxDB
-- Triggers rule evaluations
-- Provides REST APIs and WebSocket for data access
+## Base URL
+- `http://<host>:8081`
+- API prefix from config: `settings.api_prefix` (default: `/api/v1/data`)
 
-## Architecture
+## Health Endpoints
+- `GET /` (service info)
+- `GET /api/v1/data/health`
+- `GET /ws/stats` (websocket runtime stats)
 
-```
-MQTT Broker → MQTT Handler → Validation → Enrichment → InfluxDB
-                                    ↓
-                              Rule Engine (async)
-                                    ↓
-                              WebSocket Broadcast
-```
+## REST API
+Under default prefix `/api/v1/data`:
+- `GET /telemetry/{device_id}`
+  - Query windowed telemetry with optional field selection/aggregation.
+- `GET /stats/{device_id}`
+  - Aggregated stats for a device.
+- `POST /query`
+  - Custom query payload for advanced reads.
 
-## Features
+Additional direct telemetry router endpoints are also mounted:
+- `GET /telemetry/{device_id}`
+- `GET /stats/{device_id}`
 
-### MQTT Subscriber
-- Topic: `devices/+/telemetry`
-- QoS 1 (at-least-once delivery)
-- Automatic reconnection with exponential backoff
+## Runtime Pipeline
+1. MQTT subscription receives telemetry.
+2. Payload validation and schema checks.
+3. Device metadata enrichment.
+4. InfluxDB write (device tag isolation).
+5. Async rule-engine evaluation call.
+6. WebSocket broadcast to subscribers.
 
-### Validation
-- Required fields: device_id, timestamp, voltage, current, power, temperature
-- Numeric range validation
-- Schema version validation (strict v1 support)
-- Dead Letter Queue for invalid messages
+## MQTT Contract
+- Configured topic pattern default: `devices/+/telemetry`
+- Message must include valid device identity and telemetry payload.
+- Ingestion validates topic/device mapping before persistence.
 
-### Enrichment
-- Fetches device metadata from Device Service
-- Non-blocking async calls
-- Enrichment status tracking
-
-### Persistence
-- InfluxDB for time-series data
-- Tags: device_id, schema_version, enrichment_status
-- Fields: voltage, current, power, temperature
-
-### Rule Engine Integration
-- Async rule evaluation triggers
-- Circuit breaker pattern
-- Retry with exponential backoff
-
-## API Endpoints
-
-### Health
-- `GET /api/data/health` - Health check
-
-### Telemetry
-- `GET /api/data/telemetry/{device_id}` - Get device telemetry
-  - Query params: start_time, end_time, fields, aggregate, interval, limit
-- `GET /api/data/stats/{device_id}` - Get device statistics
-- `POST /api/data/query` - Custom query
-
-### WebSocket
-- `WS /ws/telemetry/{device_id}` - Live telemetry stream
+## Query/Storage Model
+- InfluxDB stores device telemetry as time-series.
+- Device isolation is enforced via `device_id` tag in queries and writes.
+- Time-bounded reads are used for API performance.
 
 ## Configuration
+File: `src/config/settings.py`
+Key env groups:
+- MQTT
+- InfluxDB
+- Device-service URL
+- Rule-engine URL
+- API prefix
+- validation ranges
+- websocket limits
 
-Environment variables:
-
-```bash
-# Server
-HOST=0.0.0.0
-PORT=8081
-LOG_LEVEL=INFO
-
-# MQTT
-MQTT_BROKER_HOST=localhost
-MQTT_BROKER_PORT=1883
-MQTT_TOPIC=devices/+/telemetry
-MQTT_QOS=1
-
-# InfluxDB
-INFLUXDB_URL=http://localhost:8086
-INFLUXDB_TOKEN=your-token
-INFLUXDB_ORG=energy-platform
-INFLUXDB_BUCKET=telemetry
-
-# Device Service
-DEVICE_SERVICE_URL=http://device-service:8080
-
-# Rule Engine
-RULE_ENGINE_URL=http://rule-engine:8082
-
-# DLQ
-DLQ_ENABLED=true
-DLQ_DIRECTORY=./dlq
-```
-
-## Running
-
-### Development
-
-```bash
-cd services/data-service
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cd src
-python main.py
-```
-
-### Production
-
-```bash
-uvicorn src.main:app --host 0.0.0.0 --port 8081 --workers 4
-```
-
-## Testing
-
-```bash
-pytest tests/ -v --cov=src --cov-report=html
-```
-
-## Data Model
-
-### Telemetry Payload (v1)
-
-```json
-{
-  "device_id": "D1",
-  "timestamp": "2026-02-07T11:26:00Z",
-  "voltage": 230.5,
-  "current": 0.85,
-  "power": 195.9,
-  "temperature": 45.2,
-  "schema_version": "v1"
-}
-```
-
-### Validation Rules
-
-- voltage: 200-250 V
-- current: 0-2 A
-- power: 0-500 W
-- temperature: 20-80 °C
-
-## License
-
-Copyright © 2026 Energy Intelligence Platform
+## Reliability and Safety
+- Structured error responses for API failures.
+- Retry/circuit-breaker patterns for downstream calls.
+- Dead-letter support for invalid telemetry messages.

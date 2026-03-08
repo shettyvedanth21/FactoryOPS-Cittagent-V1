@@ -219,6 +219,12 @@ class EmailAdapter(NotificationChannel):
     
     def _format_alert_message(self, rule: Rule, device_id: str, message: str) -> str:
         """Format threshold alert email."""
+        condition_text = (
+            f"{rule.condition} {rule.threshold}"
+            if rule.rule_type != "time_based"
+            else f"running between {rule.time_window_start}-{rule.time_window_end} IST"
+        )
+        property_text = rule.property if rule.rule_type != "time_based" else "power status"
         return f"""
 <!DOCTYPE html>
 <html>
@@ -242,8 +248,8 @@ class EmailAdapter(NotificationChannel):
             <div class="alert-box">
                 <p><span class="label">Rule:</span> {rule.rule_name}</p>
                 <p><span class="label">Device ID:</span> {device_id}</p>
-                <p><span class="label">Property:</span> {rule.property}</p>
-                <p><span class="label">Condition:</span> {rule.condition} {rule.threshold}</p>
+                <p><span class="label">Property:</span> {property_text}</p>
+                <p><span class="label">Condition:</span> {condition_text}</p>
                 <p><span class="label">Message:</span> {message}</p>
                 <p><span class="label">Time:</span> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
             </div>
@@ -259,6 +265,12 @@ class EmailAdapter(NotificationChannel):
     def _format_rule_created_message(self, rule: Rule, device_id: str, message: str, device_names: str = None) -> str:
         """Format rule created confirmation email."""
         status_value = rule.status.value if hasattr(rule.status, 'value') else str(rule.status)
+        condition_text = (
+            f"{rule.condition} {rule.threshold}"
+            if rule.rule_type != "time_based"
+            else f"running between {rule.time_window_start}-{rule.time_window_end} IST"
+        )
+        property_text = rule.property if rule.rule_type != "time_based" else "power status"
         
         devices_display = device_names if device_names else device_id
         
@@ -289,8 +301,8 @@ class EmailAdapter(NotificationChannel):
                 <p><span class="label">Rule ID:</span> {rule.rule_id}</p>
                 <p><span class="label">Devices:</span> {devices_display}</p>
                 <p><span class="label">Status:</span> {status_value}</p>
-                <p><span class="label">Property:</span> {rule.property}</p>
-                <p><span class="label">Condition:</span> {rule.condition} {rule.threshold}</p>
+                <p><span class="label">Property:</span> {property_text}</p>
+                <p><span class="label">Condition:</span> {condition_text}</p>
                 <p><span class="label">Notification Channels:</span> {', '.join(rule.notification_channels) if rule.notification_channels else 'None'}</p>
                 <p><span class="label">Created:</span> {rule.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') if rule.created_at else datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
             </div>
@@ -480,4 +492,3 @@ class NotificationAdapter:
 
 
 notification_adapter = NotificationAdapter()
-

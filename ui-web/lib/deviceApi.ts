@@ -28,6 +28,46 @@ export interface Device {
   location: string;
 }
 
+export type DeviceLoadState = "running" | "idle" | "unloaded" | "unknown";
+
+export interface IdleConfig {
+  device_id: string;
+  idle_current_threshold: number | null;
+  configured: boolean;
+}
+
+export interface CurrentState {
+  device_id: string;
+  state: DeviceLoadState;
+  current: number | null;
+  voltage: number | null;
+  threshold: number | null;
+  timestamp: string | null;
+  current_field: string | null;
+  voltage_field: string | null;
+}
+
+export interface IdlePeriodStats {
+  idle_duration_minutes: number;
+  idle_duration_label: string;
+  idle_energy_kwh: number;
+  idle_cost: number | null;
+  currency: string;
+}
+
+export interface IdleStats {
+  device_id: string;
+  today: IdlePeriodStats | null;
+  month: IdlePeriodStats | null;
+  tariff_configured: boolean;
+  pf_estimated: boolean;
+  threshold_configured: boolean;
+  idle_current_threshold: number | null;
+  data_source_type: "metered" | "sensor" | string;
+  tariff_cache?: string;
+  tariff_stale?: boolean;
+}
+
 interface DeviceApiResponse<T> {
   success: boolean;
   data: T;
@@ -77,6 +117,74 @@ export async function getDeviceById(deviceId: string): Promise<Device | null> {
   const json: DeviceApiResponse<BackendDevice> = await res.json();
 
   return json.data ? mapDevice(json.data) : null;
+}
+
+export async function getIdleConfig(deviceId: string): Promise<IdleConfig> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/idle-config`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    idle_current_threshold: json.idle_current_threshold,
+    configured: Boolean(json.configured),
+  };
+}
+
+export async function saveIdleConfig(deviceId: string, idleCurrentThreshold: number): Promise<IdleConfig> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/idle-config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idle_current_threshold: idleCurrentThreshold }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    idle_current_threshold: json.idle_current_threshold,
+    configured: Boolean(json.configured),
+  };
+}
+
+export async function getCurrentState(deviceId: string): Promise<CurrentState> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/current-state`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    state: json.state ?? "unknown",
+    current: json.current ?? null,
+    voltage: json.voltage ?? null,
+    threshold: json.threshold ?? null,
+    timestamp: json.timestamp ?? null,
+    current_field: json.current_field ?? null,
+    voltage_field: json.voltage_field ?? null,
+  };
+}
+
+export async function getIdleStats(deviceId: string): Promise<IdleStats> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/idle-stats`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    today: json.today ?? null,
+    month: json.month ?? null,
+    tariff_configured: Boolean(json.tariff_configured),
+    pf_estimated: Boolean(json.pf_estimated),
+    threshold_configured: Boolean(json.threshold_configured),
+    idle_current_threshold: json.idle_current_threshold ?? null,
+    data_source_type: json.data_source_type,
+    tariff_cache: json.tariff_cache,
+    tariff_stale: json.tariff_stale,
+  };
 }
 
 

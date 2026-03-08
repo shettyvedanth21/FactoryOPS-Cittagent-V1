@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from typing import Any, Dict, Optional
+import re
 
 import paho.mqtt.client as mqtt
 
@@ -26,6 +27,28 @@ class MQTTHandler:
     - Async processing to avoid blocking MQTT loop
     - Connection state management
     """
+
+    _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+    @classmethod
+    def _extract_device_id_from_topic(cls, topic: str) -> Optional[str]:
+        """
+        Extract device_id from MQTT topic with strict suffix semantics.
+
+        Supported patterns:
+        - devices/{device_id}/telemetry
+        - factory/{device_id}/telemetry
+        - .../{device_id}/telemetry
+        """
+        parts = [p for p in (topic or "").split("/") if p]
+        if len(parts) < 3:
+            return None
+        if parts[-1].lower() != "telemetry":
+            return None
+        candidate = parts[-2].strip()
+        if not candidate or not cls._DEVICE_ID_PATTERN.match(candidate):
+            return None
+        return candidate
 
     def __init__(
         self,
@@ -225,6 +248,28 @@ class MQTTHandler:
                 "Failed to parse MQTT message payload",
                 topic=msg.topic,
                 error=str(e),
+                correlation_id=correlation_id,
+            )
+            return
+
+        topic_device_id = self._extract_device_id_from_topic(msg.topic)
+        if not topic_device_id:
+            logger.warning(
+                "Dropping telemetry message with invalid topic format",
+                topic=msg.topic,
+                correlation_id=correlation_id,
+            )
+            return
+
+        payload_device_id = payload.get("device_id")
+        if payload_device_id is None:
+            payload["device_id"] = topic_device_id
+        elif str(payload_device_id).strip() != topic_device_id:
+            logger.warning(
+                "Dropping telemetry due to topic/payload device_id mismatch",
+                topic=msg.topic,
+                topic_device_id=topic_device_id,
+                payload_device_id=payload_device_id,
                 correlation_id=correlation_id,
             )
             return

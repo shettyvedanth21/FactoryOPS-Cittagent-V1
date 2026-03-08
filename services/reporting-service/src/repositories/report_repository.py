@@ -3,7 +3,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from src.models import EnergyReport, ReportType
+from src.models import EnergyReport, ReportType, ReportStatus
 
 
 class ReportRepository:
@@ -70,3 +70,25 @@ class ReportRepository:
         
         result = await self.db.execute(query)
         return list(result.scalars().all())
+
+    async def find_active_duplicate(
+        self,
+        tenant_id: str,
+        report_type: str,
+        dedup_signature: str,
+        limit: int = 50,
+    ) -> Optional[EnergyReport]:
+        query = (
+            select(EnergyReport)
+            .where(EnergyReport.tenant_id == tenant_id)
+            .where(EnergyReport.report_type == ReportType(report_type))
+            .where(EnergyReport.status.in_([ReportStatus.pending, ReportStatus.processing]))
+            .order_by(EnergyReport.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.db.execute(query)
+        for report in result.scalars().all():
+            params = report.params or {}
+            if params.get("dedup_signature") == dedup_signature:
+                return report
+        return None

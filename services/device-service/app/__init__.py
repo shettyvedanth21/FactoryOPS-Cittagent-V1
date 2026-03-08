@@ -7,7 +7,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
         ParameterHealthConfig,
         DeviceProperty,
         DevicePerformanceTrend,
+        IdleRunningLog,
     )
     
     async with engine.begin() as conn:
@@ -53,6 +55,7 @@ async def lifespan(app: FastAPI):
     async def run_performance_trends_scheduler():
         from app.database import AsyncSessionLocal
         from app.services.performance_trends import PerformanceTrendService
+        from app.services.idle_running import IdleRunningService
 
         interval_minutes = max(1, settings.PERFORMANCE_TRENDS_INTERVAL_MINUTES)
         interval_seconds = interval_minutes * 60
@@ -71,14 +74,18 @@ async def lifespan(app: FastAPI):
                 async with AsyncSessionLocal() as session:
                     service = PerformanceTrendService(session)
                     summary = await service.materialize_latest_bucket()
+                    idle_service = IdleRunningService(session)
+                    idle_summary = await idle_service.aggregate_all_configured_devices()
                     safe_summary = {
                         "devices_total": summary.get("devices_total", 0),
                         "created_count": summary.get("created", 0),
                         "updated_count": summary.get("updated", 0),
                         "failed_count": summary.get("failed", 0),
+                        "idle_processed": idle_summary.get("processed", 0),
+                        "idle_failed": idle_summary.get("failed", 0),
                     }
                     logger.info(
-                        "Performance trends bucket materialized",
+                        "Performance trends and idle aggregation cycle completed",
                         extra=safe_summary,
                     )
             except Exception as exc:
@@ -128,6 +135,45 @@ app = FastAPI(
 )
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "VALIDATION_ERROR",
+            "message": "Invalid request payload",
+            "code": "VALIDATION_ERROR",
+            "details": exc.errors(),
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    if isinstance(exc.detail, dict):
+        payload = dict(exc.detail)
+        payload.setdefault("code", payload.get("error", "HTTP_ERROR"))
+        payload.setdefault("message", "Request failed")
+        return JSONResponse(status_code=exc.status_code, content=payload)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": "HTTP_ERROR", "message": str(exc.detail), "code": "HTTP_ERROR"},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception in device-service")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "INTERNAL_ERROR",
+            "message": "Unexpected server error",
+            "code": "INTERNAL_ERROR",
+        },
+    )
 
 
 @app.get("/health", tags=["health"])
