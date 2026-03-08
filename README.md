@@ -111,7 +111,10 @@ Note: runtime status changes to `running` only after telemetry arrives.
 Run simulator for a specific device:
 
 ```bash
+cd /home/ubuntu/FactoryOPS-Testing
 DEVICE_ID=COMPRESSOR-001 docker compose --profile demo up -d telemetry-simulator
+docker compose logs -f telemetry-simulator
+
 ```
 
 Check simulator logs:
