@@ -68,9 +68,31 @@ export interface IdleStats {
   tariff_stale?: boolean;
 }
 
+export interface DashboardWidgetConfig {
+  device_id: string;
+  available_fields: string[];
+  selected_fields: string[];
+  effective_fields: string[];
+  default_applied: boolean;
+}
+
 interface DeviceApiResponse<T> {
   success: boolean;
   data: T;
+}
+
+async function readApiError(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    if (body?.message) return String(body.message);
+    if (body?.error?.message) return String(body.error.message);
+    if (body?.detail?.message) return String(body.detail.message);
+    if (typeof body?.detail === "string") return body.detail;
+    return `HTTP ${res.status}`;
+  } catch {
+    const text = await res.text();
+    return text || `HTTP ${res.status}`;
+  }
 }
 
 /* ----------------------- */
@@ -187,6 +209,47 @@ export async function getIdleStats(deviceId: string): Promise<IdleStats> {
   };
 }
 
+export async function getDashboardWidgetConfig(deviceId: string): Promise<DashboardWidgetConfig> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/dashboard-widgets`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    available_fields: json.available_fields ?? [],
+    selected_fields: json.selected_fields ?? [],
+    effective_fields: json.effective_fields ?? [],
+    default_applied: Boolean(json.default_applied),
+  };
+}
+
+export async function saveDashboardWidgetConfig(
+  deviceId: string,
+  selectedFields: string[]
+): Promise<DashboardWidgetConfig> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/dashboard-widgets`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selected_fields: selectedFields }),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(body || `HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    available_fields: json.available_fields ?? [],
+    selected_fields: json.selected_fields ?? [],
+    effective_fields: json.effective_fields ?? [],
+    default_applied: Boolean(json.default_applied),
+  };
+}
+
 
 /* =====================================================
  * Shift Configuration API
@@ -261,7 +324,7 @@ export async function createShift(deviceId: string, shift: ShiftCreate): Promise
     body: JSON.stringify(shift),
   });
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
+    throw new Error(await readApiError(res));
   }
   const json = await res.json();
   return mapShift(json.data);
@@ -281,7 +344,7 @@ export async function updateShift(
     }
   );
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
+    throw new Error(await readApiError(res));
   }
   const json = await res.json();
   return mapShift(json.data);

@@ -404,6 +404,23 @@ class AllDevicesPropertiesResponse(BaseModel):
     all_properties: list[str] = Field(..., description="All unique properties across devices")
 
 
+class DashboardWidgetConfigUpdateRequest(BaseModel):
+    """Idempotent replace request for dashboard widget fields."""
+
+    selected_fields: list[str] = Field(default_factory=list, description="Ordered list of selected widget field names")
+
+
+class DashboardWidgetConfigResponse(BaseModel):
+    """Widget visibility configuration response for a device dashboard."""
+
+    success: bool = True
+    device_id: str
+    available_fields: list[str] = Field(default_factory=list)
+    selected_fields: list[str] = Field(default_factory=list)
+    effective_fields: list[str] = Field(default_factory=list)
+    default_applied: bool = True
+
+
 # =====================================================
 # Performance Trends Schemas
 # =====================================================

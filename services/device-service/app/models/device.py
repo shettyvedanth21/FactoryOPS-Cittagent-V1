@@ -421,6 +421,71 @@ class DeviceProperty(Base):
         return f"<DeviceProperty(device_id={self.device_id}, property={self.property_name})>"
 
 
+class DeviceDashboardWidget(Base):
+    """Per-device dashboard widget visibility configuration."""
+
+    __tablename__ = "device_dashboard_widgets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("devices.device_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    field_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("device_id", "field_name", name="uq_device_dashboard_widget"),
+        Index("ix_device_dashboard_widgets_device_order", "device_id", "display_order"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DeviceDashboardWidget(device_id={self.device_id}, field_name={self.field_name})>"
+
+
+class DeviceDashboardWidgetSetting(Base):
+    """Per-device widget config state to distinguish default/fallback vs explicit empty."""
+
+    __tablename__ = "device_dashboard_widget_settings"
+
+    device_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("devices.device_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_configured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DeviceDashboardWidgetSetting(device_id={self.device_id}, "
+            f"is_configured={self.is_configured})>"
+        )
+
+
 class IdleRunningLog(Base):
     """Daily aggregate idle-running consumption log per device."""
 

@@ -35,6 +35,9 @@ import {
   PerformanceTrendData,
   PerformanceTrendRange,
   PerformanceTrendMetric,
+  DashboardWidgetConfig,
+  getDashboardWidgetConfig,
+  saveDashboardWidgetConfig,
 } from "@/lib/deviceApi";
 import {
   getTelemetry,
@@ -92,6 +95,75 @@ const TREND_RANGE_OPTIONS: { label: string; value: PerformanceTrendRange }[] = [
   { label: "7d", value: "7d" },
   { label: "30d", value: "30d" },
 ];
+
+type ShiftSegment = {
+  day: number;
+  start: number;
+  end: number;
+};
+
+function toMinutes(timeValue: string): number | null {
+  const parts = timeValue.split(":");
+  if (parts.length < 2) return null;
+  const hour = Number(parts[0]);
+  const minute = Number(parts[1]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+
+function toDisplayTime(timeValue: string): string {
+  const parts = timeValue.split(":");
+  if (parts.length < 2) return timeValue;
+  const hh = parts[0].padStart(2, "0");
+  const mm = parts[1].padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+function isOvernightRange(startTime: string, endTime: string): boolean {
+  const start = toMinutes(startTime);
+  const end = toMinutes(endTime);
+  if (start === null || end === null) return false;
+  return end <= start;
+}
+
+function formatShiftRange(startTime: string, endTime: string): string {
+  const overnight = isOvernightRange(startTime, endTime);
+  return `${toDisplayTime(startTime)} - ${toDisplayTime(endTime)}${overnight ? " (+1 day)" : ""}`;
+}
+
+function buildShiftSegments(startTime: string, endTime: string, dayOfWeek: number | null): ShiftSegment[] {
+  const start = toMinutes(startTime);
+  const end = toMinutes(endTime);
+  if (start === null || end === null || start === end) return [];
+
+  const days = dayOfWeek === null ? [0, 1, 2, 3, 4, 5, 6] : [dayOfWeek];
+  const segments: ShiftSegment[] = [];
+  for (const day of days) {
+    if (end > start) {
+      segments.push({ day, start, end });
+      continue;
+    }
+    segments.push({ day, start, end: 24 * 60 });
+    segments.push({ day: (day + 1) % 7, start: 0, end });
+  }
+  return segments;
+}
+
+function hasSegmentOverlap(a: ShiftSegment, b: ShiftSegment): boolean {
+  if (a.day !== b.day) return false;
+  return a.start < b.end && b.start < a.end;
+}
+
+function findOverlapConflicts(candidate: ShiftCreate, existingShifts: Shift[]): Shift[] {
+  const candidateSegments = buildShiftSegments(candidate.shift_start, candidate.shift_end, candidate.day_of_week ?? null);
+  if (candidateSegments.length === 0) return [];
+
+  return existingShifts.filter((shift) => {
+    const shiftSegments = buildShiftSegments(shift.shift_start, shift.shift_end, shift.day_of_week);
+    return candidateSegments.some((cand) => shiftSegments.some((seg) => hasSegmentOverlap(cand, seg)));
+  });
+}
 
 function getDynamicMetrics(telemetry: TelemetryPoint[]): string[] {
   const latest = telemetry.at(-1);
@@ -599,6 +671,11 @@ export default function MachineDashboardPage() {
   const [idleThresholdInput, setIdleThresholdInput] = useState<string>("");
   const [idleSaveMessage, setIdleSaveMessage] = useState<string>("");
   const [idleSaving, setIdleSaving] = useState(false);
+  const [widgetConfig, setWidgetConfig] = useState<DashboardWidgetConfig | null>(null);
+  const [selectedWidgetFields, setSelectedWidgetFields] = useState<string[]>([]);
+  const [widgetSaveMessage, setWidgetSaveMessage] = useState<string>("");
+  const [widgetSaving, setWidgetSaving] = useState(false);
+  const [widgetDirty, setWidgetDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "telemetry" | "parameters" | "rules">("overview");
@@ -624,12 +701,13 @@ export default function MachineDashboardPage() {
 
   const fetchData = async (isInitial = false) => {
     try {
-      const [machineData, telemetryData, uptimeData, shiftsData, healthConfigsData] = await Promise.all([
+      const [machineData, telemetryData, uptimeData, shiftsData, healthConfigsData, widgetConfigData] = await Promise.all([
         getDeviceById(deviceId),
         getTelemetry(deviceId, { limit: "100" }),
         getUptime(deviceId),
         getShifts(deviceId),
         getHealthConfigs(deviceId),
+        getDashboardWidgetConfig(deviceId),
       ]);
       // Always update machine data to get latest last_seen_timestamp
       setMachine(machineData);
@@ -641,6 +719,11 @@ export default function MachineDashboardPage() {
       setUptime(uptimeData);
       setShifts(shiftsData);
       setHealthConfigs(healthConfigsData);
+      setWidgetConfig(widgetConfigData);
+      if (isInitial || !widgetDirty) {
+        setSelectedWidgetFields(widgetConfigData.effective_fields || []);
+        setWidgetDirty(false);
+      }
       
       const latest = ascTelemetry.at(-1);
       if (latest && healthConfigsData.length > 0) {
@@ -783,6 +866,14 @@ export default function MachineDashboardPage() {
   }, [deviceId, trendMetric, trendRange]);
 
   const handleAddShift = async () => {
+    if (newShift.shift_start === newShift.shift_end) {
+      alert("Shift start and end times cannot be the same.");
+      return;
+    }
+    if (shiftOverlapConflicts.length > 0) {
+      alert("Shift overlaps with existing shifts. Please pick a non-overlapping time.");
+      return;
+    }
     try {
       await createShift(deviceId, newShift);
       setShowAddShift(false);
@@ -838,6 +929,33 @@ export default function MachineDashboardPage() {
     }
   };
 
+  const handleToggleWidgetField = (field: string) => {
+    setWidgetSaveMessage("");
+    setWidgetDirty(true);
+    setSelectedWidgetFields((prev) => {
+      if (prev.includes(field)) {
+        return prev.filter((f) => f !== field);
+      }
+      return [...prev, field];
+    });
+  };
+
+  const handleSaveWidgetConfig = async () => {
+    try {
+      setWidgetSaving(true);
+      setWidgetSaveMessage("");
+      const saved = await saveDashboardWidgetConfig(deviceId, selectedWidgetFields);
+      setWidgetConfig(saved);
+      setSelectedWidgetFields(saved.effective_fields || []);
+      setWidgetSaveMessage("Widget configuration saved.");
+      setWidgetDirty(false);
+    } catch (err) {
+      alert("Failed: " + (err as Error).message);
+    } finally {
+      setWidgetSaving(false);
+    }
+  };
+
   const handleMarkAllRead = async () => {
     try {
       await markAllActivityRead(deviceId);
@@ -862,6 +980,9 @@ export default function MachineDashboardPage() {
 
   const latestTelemetry = telemetry.at(-1);
   const dynamicMetrics = getDynamicMetrics(telemetry);
+  const effectiveWidgetFields = widgetConfig?.effective_fields || dynamicMetrics;
+  const selectedWidgetFieldSet = new Set(selectedWidgetFields);
+  const visibleOverviewMetrics = effectiveWidgetFields.filter((field) => dynamicMetrics.includes(field));
   const healthPercent = typeof healthScore?.health_score === "number" ? healthScore.health_score : null;
   const uptimePercent = typeof uptime?.uptime_percentage === "number" ? uptime.uptime_percentage : null;
   const performanceChartData = (trendData?.points || [])
@@ -870,6 +991,16 @@ export default function MachineDashboardPage() {
       value: trendMetric === "health" ? point.health_score : point.uptime_percentage,
     }))
     .filter((p) => typeof p.value === "number") as Array<{ timestamp: string; value: number }>;
+  const shiftTimeEqual = newShift.shift_start === newShift.shift_end;
+  const shiftOverlapConflicts = findOverlapConflicts(newShift, shifts);
+  const shiftFormError = shiftTimeEqual
+    ? "Start and end cannot be the same."
+    : shiftOverlapConflicts.length > 0
+      ? `Overlaps with: ${shiftOverlapConflicts
+          .map((s) => `${s.shift_name} (${formatShiftRange(s.shift_start, s.shift_end)})`)
+          .join(", ")}`
+      : "";
+  const shiftFormBlocked = !newShift.shift_name || shiftTimeEqual || shiftOverlapConflicts.length > 0;
 
   return (
     <div className="p-8">
@@ -1097,9 +1228,9 @@ export default function MachineDashboardPage() {
 
         {activeTab === "overview" && (
           <div className="space-y-6">
-            {dynamicMetrics.length > 0 && (
+            {visibleOverviewMetrics.length > 0 && (
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-                {dynamicMetrics.map((metric) => {
+                {visibleOverviewMetrics.map((metric) => {
                   const value = (latestTelemetry as any)[metric];
                   if (typeof value !== 'number') return null;
                   return (
@@ -1115,9 +1246,9 @@ export default function MachineDashboardPage() {
               </div>
             )}
 
-            {telemetry.length > 0 && (
+            {telemetry.length > 0 && visibleOverviewMetrics.length > 0 && (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {dynamicMetrics.map((metric) => {
+                {visibleOverviewMetrics.map((metric) => {
                   const data = getMetricData(telemetry, metric);
                   if (data.length === 0) return null;
                   return <Card key={metric}><CardHeader><CardTitle>{METRIC_LABELS[metric] || metric} Trend</CardTitle></CardHeader><CardContent><TimeSeriesChart data={data} color={METRIC_COLORS[metric] || "#2563eb"} unit={METRIC_UNITS[metric] || ""} /></CardContent></Card>;
@@ -1227,6 +1358,71 @@ export default function MachineDashboardPage() {
         {activeTab === "parameters" && (
           <div className="space-y-6">
             <Card>
+              <CardHeader>
+                <CardTitle>Telemetry Widgets</CardTitle>
+                <p className="text-sm text-slate-600">
+                  Select telemetry widgets to show on this machine dashboard.
+                </p>
+              </CardHeader>
+              <CardContent>
+                {widgetConfig && widgetConfig.available_fields.length > 0 ? (
+                  <>
+                    <div className="flex flex-wrap gap-3">
+                      {widgetConfig.available_fields.map((field) => {
+                        const selected = selectedWidgetFieldSet.has(field);
+                        return (
+                          <button
+                            key={field}
+                            type="button"
+                            onClick={() => handleToggleWidgetField(field)}
+                            className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition ${
+                              selected
+                                ? "border-blue-300 bg-blue-50 text-blue-700"
+                                : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                            }`}
+                          >
+                            <span className={`inline-flex h-4 w-4 items-center justify-center rounded border text-xs ${
+                              selected ? "border-blue-500 bg-blue-600 text-white" : "border-slate-400 text-transparent"
+                            }`}>
+                              ✓
+                            </span>
+                            <span
+                              className="h-2.5 w-2.5 rounded-full"
+                              style={{ backgroundColor: METRIC_COLORS[field] || "#64748b" }}
+                            />
+                            {METRIC_LABELS[field] || field}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-4 flex items-center gap-3">
+                      <Button onClick={handleSaveWidgetConfig} disabled={widgetSaving || !widgetDirty}>
+                        {widgetSaving ? "Saving..." : "Save Widgets"}
+                      </Button>
+                      {widgetDirty && (
+                        <p className="text-xs text-amber-700">
+                          Unsaved changes
+                        </p>
+                      )}
+                      {widgetConfig.default_applied && (
+                        <p className="text-xs text-slate-500">
+                          Default mode active: all discovered widgets are shown until you save.
+                        </p>
+                      )}
+                      {widgetSaveMessage && (
+                        <p className="text-xs text-emerald-700">{widgetSaveMessage}</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-sm text-slate-500">
+                    No numeric telemetry fields discovered yet. Start telemetry to configure widgets.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle>Shift Configuration</CardTitle>
                 <Button onClick={() => setShowAddShift(!showAddShift)}>{showAddShift ? "Cancel" : "+ Add Shift"}</Button>
@@ -1234,6 +1430,9 @@ export default function MachineDashboardPage() {
               <CardContent>
                 {showAddShift && (
                   <div className="bg-slate-50 p-4 rounded-lg mb-6 space-y-4">
+                    <p className="text-xs text-slate-600">
+                      Rule: overlaps are not allowed. Touching boundaries are allowed (for example, 09:00-10:00 and 10:00-11:00). Overnight shifts are shown as <span className="font-semibold">(+1 day)</span>.
+                    </p>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div><label className="block text-sm font-medium mb-1">Shift Name</label><input type="text" value={newShift.shift_name} onChange={(e) => setNewShift({ ...newShift, shift_name: e.target.value })} placeholder="e.g., Morning Shift" className="w-full px-3 py-2 border rounded-md" /></div>
                       <div><label className="block text-sm font-medium mb-1">Day of Week</label><select value={newShift.day_of_week ?? ""} onChange={(e) => setNewShift({ ...newShift, day_of_week: e.target.value ? parseInt(e.target.value) : null })} className="w-full px-3 py-2 border rounded-md">{DAYS_OF_WEEK.map(d => <option key={d.value ?? "all"} value={d.value ?? ""}>{d.label}</option>)}</select></div>
@@ -1241,7 +1440,10 @@ export default function MachineDashboardPage() {
                       <div><label className="block text-sm font-medium mb-1">End Time</label><input type="time" value={newShift.shift_end} onChange={(e) => setNewShift({ ...newShift, shift_end: e.target.value })} className="w-full px-3 py-2 border rounded-md" /></div>
                       <div><label className="block text-sm font-medium mb-1">Maintenance Break (min)</label><input type="number" min="0" max="480" value={newShift.maintenance_break_minutes} onChange={(e) => setNewShift({ ...newShift, maintenance_break_minutes: parseInt(e.target.value) || 0 })} className="w-full px-3 py-2 border rounded-md" /></div>
                     </div>
-                    <Button onClick={handleAddShift} disabled={!newShift.shift_name}>Save Shift</Button>
+                    {shiftFormError && (
+                      <p className="text-sm text-red-600">{shiftFormError}</p>
+                    )}
+                    <Button onClick={handleAddShift} disabled={shiftFormBlocked}>Save Shift</Button>
                   </div>
                 )}
                 {shifts.length === 0 ? <div className="text-center py-8 text-slate-500">No shifts configured</div> : (
@@ -1250,7 +1452,13 @@ export default function MachineDashboardPage() {
                       <div key={shift.id} className={`flex items-center justify-between p-4 rounded-lg border ${shift.is_active ? "bg-white" : "bg-slate-50 opacity-60"}`}>
                         <div>
                           <div className="flex items-center gap-2"><h3 className="font-medium">{shift.shift_name}</h3>{!shift.is_active && <span className="text-xs bg-slate-200 px-2 py-0.5 rounded">Inactive</span>}</div>
-                          <p className="text-sm text-slate-500 mt-1">{shift.shift_start.slice(0,5)} - {shift.shift_end.slice(0,5)}{shift.maintenance_break_minutes > 0 && <span className="ml-2">(Break: {shift.maintenance_break_minutes} min)</span>}</p>
+                          <p className="text-sm text-slate-500 mt-1">
+                            {formatShiftRange(shift.shift_start, shift.shift_end)}
+                            {isOvernightRange(shift.shift_start, shift.shift_end) && (
+                              <span className="ml-2 inline-flex rounded bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700">Overnight shift</span>
+                            )}
+                            {shift.maintenance_break_minutes > 0 && <span className="ml-2">(Break: {shift.maintenance_break_minutes} min)</span>}
+                          </p>
                           <p className="text-xs text-slate-400 mt-1">{DAYS_OF_WEEK.find(d => d.value === shift.day_of_week)?.label || "All Days"}</p>
                         </div>
                         <Button variant="danger" size="sm" onClick={() => handleDeleteShift(shift.id)}>Delete</Button>

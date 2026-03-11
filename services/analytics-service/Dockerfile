@@ -23,5 +23,6 @@ COPY . .
 # Set PYTHONPATH
 ENV PYTHONPATH=/app
 
-# Run migrations and start app
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8003"]
+RUN chmod +x /app/start.sh
+
+CMD ["./start.sh"]

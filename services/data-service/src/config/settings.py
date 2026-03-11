@@ -52,6 +52,19 @@ class Settings(BaseSettings):
     )
     device_service_timeout: float = Field(default=5.0, description="Device service timeout in seconds")
     device_service_max_retries: int = Field(default=3, description="Max retries for device service")
+    device_sync_enabled: bool = Field(default=True, description="Enable async device heartbeat/property sync")
+    device_sync_workers: int = Field(default=2, description="Number of device sync workers")
+    device_sync_queue_maxsize: int = Field(default=5000, description="Max queued device sync tasks")
+    device_sync_max_retries: int = Field(default=3, description="Max retries for each device sync task")
+    device_sync_retry_backoff_sec: float = Field(default=0.5, description="Initial sync retry backoff in seconds")
+    device_sync_retry_backoff_max_sec: float = Field(default=5.0, description="Max sync retry backoff in seconds")
+
+    # MySQL Configuration (for durable DLQ backend)
+    mysql_host: str = Field(default="mysql", description="MySQL host")
+    mysql_port: int = Field(default=3306, description="MySQL port")
+    mysql_database: str = Field(default="ai_factoryops", description="MySQL database name")
+    mysql_user: str = Field(default="energy", description="MySQL username")
+    mysql_password: str = Field(default="energy", description="MySQL password")
 
     # Rule Engine Configuration
     rule_engine_url: str = Field(
@@ -68,9 +81,12 @@ class Settings(BaseSettings):
 
     # DLQ Configuration
     dlq_enabled: bool = Field(default=True, description="Enable dead letter queue")
+    dlq_backend: str = Field(default="mysql", description="DLQ backend: mysql or file")
     dlq_directory: str = Field(default="./dlq", description="DLQ file directory")
     dlq_max_file_size: int = Field(default=10 * 1024 * 1024, description="Max DLQ file size in bytes")
     dlq_max_files: int = Field(default=10, description="Max number of DLQ files")
+    dlq_retention_days: int = Field(default=14, description="DLQ retention days for durable backend")
+    dlq_flush_batch_size: int = Field(default=100, description="Batch size for DLQ backend operations")
 
     # Telemetry Validation
     telemetry_schema_version: str = Field(default="v1", description="Supported schema version")
@@ -109,6 +125,13 @@ class Settings(BaseSettings):
         if v.upper() not in valid_levels:
             raise ValueError(f"Log level must be one of {valid_levels}")
         return v.upper()
+
+    @validator("dlq_backend")
+    def validate_dlq_backend(cls, v: str) -> str:
+        normalized = v.lower().strip()
+        if normalized not in {"mysql", "file"}:
+            raise ValueError("dlq_backend must be either 'mysql' or 'file'")
+        return normalized
 
     class Config:
         env_file = str(ENV_PATH)

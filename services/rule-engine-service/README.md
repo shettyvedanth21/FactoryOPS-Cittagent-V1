@@ -5,7 +5,7 @@ FactoryOPS real-time rule evaluation service.
 Supports threshold rules and time-based rules, per-rule/per-device cooldown, no-repeat behavior, alert history, and activity events.
 
 ## Base URL
-- `http://<host>:8082`
+- `http://<host>:8002` (compose default)
 - API prefix: `/api/v1`
 
 ## Health Endpoints

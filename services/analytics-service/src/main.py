@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 from src.api.routes import analytics, health
 from src.config.logging_config import configure_logging
 from src.config.settings import Settings, get_settings
-from src.infrastructure.database import init_db
 from src.workers.job_queue import JobQueue
 from src.workers.job_worker import JobWorker
 
@@ -25,8 +24,6 @@ async def lifespan(app: FastAPI):
     
     configure_logging(settings.log_level)
     logger.info("analytics_service_starting", version="1.0.0")
-    
-    await init_db()
     
     job_queue = JobQueue()
     job_worker = JobWorker(job_queue)

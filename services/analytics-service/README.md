@@ -3,7 +3,7 @@
 Production ML analytics service for FactoryOPS. This service runs async jobs for anomaly detection and failure prediction, supports fleet orchestration, and returns both raw and formatted results for the UI.
 
 ## Base URL
-- `http://<host>:8004` (container default may vary by compose)
+- `http://<host>:8003` (compose default)
 
 ## Health Endpoints
 - `GET /health/live`
@@ -102,3 +102,4 @@ Key settings include:
 - Jobs are async and persisted with progress/stage.
 - Formatted results are additive and backward-compatible with raw result endpoints.
 - Retrainer is lifecycle-managed and can be toggled by config.
+- Schema is managed by Alembic on startup with guarded baseline stamping.

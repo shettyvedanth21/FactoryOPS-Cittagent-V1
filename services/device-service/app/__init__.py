@@ -34,20 +34,7 @@ async def lifespan(app: FastAPI):
         }
     )
     
-    # Create tables if they don't exist
-    from app.database import Base
-    from app.models.device import (
-        Device,
-        DeviceShift,
-        ParameterHealthConfig,
-        DeviceProperty,
-        DevicePerformanceTrend,
-        IdleRunningLog,
-    )
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created/verified")
+    logger.info("Database schema is managed by Alembic migrations")
 
     stop_event = asyncio.Event()
     trends_task = None

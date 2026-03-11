@@ -26,19 +26,15 @@ This stack includes persistent named volumes:
 
 Do not remove these volumes in production unless you intentionally want data loss.
 
-### Step 3: Run DB migrations (mandatory)
-`rule-engine-service` and `reporting-service` auto-run migrations on startup.
-`device-service` requires explicit migration command:
+### Step 3: Migrations run on startup (mandatory policy)
+`device-service`, `analytics-service`, `rule-engine-service`, `reporting-service`, and
+`waste-analysis-service` run Alembic migrations on container startup.
 
-```bash
-docker compose exec device-service alembic upgrade head
-```
-
-Optional manual re-run (safe if already applied):
-```bash
-docker compose exec rule-engine-service alembic upgrade head
-docker compose exec reporting-service alembic upgrade head
-```
+Migration policy:
+- Schema is Alembic-managed (no runtime `create_all`).
+- Startup uses a guarded migration preflight.
+- Alembic stamping is allowed only when schema matches the expected baseline shape.
+- Drifted schemas fail fast with actionable logs.
 
 ### Step 4: Health verification
 ```bash
@@ -50,6 +46,33 @@ curl -s http://localhost:8085/health
 ```
 
 UI should be available at: `http://localhost:3000`
+
+### UI runtime guardrail verification (Machines route)
+Use this after UI changes before sign-off:
+
+```bash
+cd ui-web
+npm run lint:hooks
+npm run build
+```
+
+Runtime smoke check:
+- Open `http://localhost:3000/machines/COMPRESSOR-001` (configured machine)
+- Open `http://localhost:3000/machines/COMPRESSOR-003` (unconfigured/new machine)
+- Expected: no client-side crash (`React #310`), and route-level fallback appears only on unexpected runtime errors.
+
+### Runtime endpoint matrix (compose defaults)
+
+| Component | URL |
+|---|---|
+| UI | `http://localhost:3000` |
+| Device Service | `http://localhost:8000` |
+| Rule Engine Service | `http://localhost:8002` |
+| Analytics Service | `http://localhost:8003` |
+| Data Export Service | `http://localhost:8080` |
+| Data Service | `http://localhost:8081` |
+| Reporting Service | `http://localhost:8085` |
+| Waste Analysis Service | `http://localhost:8087` |
 
 ---
 
@@ -103,6 +126,56 @@ curl -s "http://localhost:8000/api/v1/devices/COMPRESSOR-001"
 ```
 
 Note: runtime status changes to `running` only after telemetry arrives.
+
+### 2.3 Dashboard Widget Configuration (per-device)
+
+Machines Overview now renders only the telemetry widgets configured for that device.
+
+- Config ownership: per-device shared config in `device-service`.
+- Scope: Overview KPI cards + Overview trend charts.
+- Processing contract: telemetry ingestion, analytics, health scoring, and rules still process all telemetry fields.
+- Default behavior: if no saved widget config exists, all discovered numeric telemetry fields are shown.
+
+Endpoints:
+
+```bash
+# Read widget configuration
+curl -s "http://localhost:8000/api/v1/devices/COMPRESSOR-001/dashboard-widgets"
+
+# Replace selected fields (idempotent full replace)
+curl -X PUT "http://localhost:8000/api/v1/devices/COMPRESSOR-001/dashboard-widgets" \
+  -H "Content-Type: application/json" \
+  -d '{"selected_fields":["current","power"]}'
+```
+
+Response shape includes:
+- `available_fields`: discovered numeric telemetry fields
+- `selected_fields`: persisted configured fields
+- `effective_fields`: fields the UI should render
+- `default_applied`: `true` when fallback-all is active (no explicit config)
+
+### 2.4 Shift Overlap Policy (production behavior)
+
+Shift scheduling is now server-enforced and non-overlapping per device.
+
+- Overlaps are blocked for all shifts (active and inactive).
+- Boundary-touching is allowed (end-exclusive): `09:00-10:00` + `10:00-11:00` is valid.
+- Works with:
+  - `day_of_week=null` (all days),
+  - day-specific shifts,
+  - cross-midnight windows (for example `22:00-02:00`).
+- On conflict, shift create/update returns HTTP `409` with conflict details.
+
+Legacy cleanup:
+- A one-time migration removes only **exact duplicate** shift rows
+  (`device_id`, `tenant_id`, `day_of_week`, `shift_start`, `shift_end`),
+  keeping the oldest row and deleting newer duplicates.
+
+Operational follow-up check:
+```bash
+./scripts/report_shift_overlap_conflicts.sh
+```
+This reports any remaining non-exact overlap conflicts for manual cleanup.
 
 ---
 

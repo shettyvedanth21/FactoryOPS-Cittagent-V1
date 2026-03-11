@@ -11,6 +11,9 @@ RUN npm ci
 # Copy source code
 COPY . .
 
+# Gate production image builds on critical hook-order violations
+RUN npm run lint:hooks
+
 # Build
 RUN npm run build
 

@@ -33,6 +33,7 @@ Additional direct telemetry router endpoints are also mounted:
 4. InfluxDB write (device tag isolation).
 5. Async rule-engine evaluation call.
 6. WebSocket broadcast to subscribers.
+7. Async device-sync worker queue updates device heartbeat/properties (non-blocking to ingest path).
 
 ## MQTT Contract
 - Configured topic pattern default: `devices/+/telemetry`
@@ -51,6 +52,8 @@ Key env groups:
 - InfluxDB
 - Device-service URL
 - Rule-engine URL
+- Device-sync worker controls
+- MySQL (durable DLQ backend)
 - API prefix
 - validation ranges
 - websocket limits
@@ -58,4 +61,5 @@ Key env groups:
 ## Reliability and Safety
 - Structured error responses for API failures.
 - Retry/circuit-breaker patterns for downstream calls.
-- Dead-letter support for invalid telemetry messages.
+- Durable MySQL-backed dead-letter queue (`dlq_messages`) by default, with file fallback.
+- Device-sync failures are retried with backoff and DLQ on exhaustion, without blocking telemetry ingestion.

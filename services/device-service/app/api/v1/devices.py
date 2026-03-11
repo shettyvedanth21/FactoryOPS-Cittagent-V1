@@ -32,6 +32,8 @@ from app.schemas.device import (
     HealthScoreResponse,
     PerformanceTrendResponse,
     DashboardSummaryResponse,
+    DashboardWidgetConfigUpdateRequest,
+    DashboardWidgetConfigResponse,
 )
 from app.services.device import DeviceService
 import logging
@@ -339,6 +341,7 @@ async def delete_device(
     status_code=status.HTTP_201_CREATED,
     responses={
         400: {"model": ErrorResponse, "description": "Validation error"},
+        409: {"model": ErrorResponse, "description": "Shift overlap conflict"},
         404: {"model": ErrorResponse, "description": "Device not found"},
     },
 )
@@ -349,7 +352,7 @@ async def create_shift(
     db: AsyncSession = Depends(get_db),
 ) -> ShiftSingleResponse:
     """Create a new shift for a device."""
-    from app.services.shift import ShiftService
+    from app.services.shift import ShiftService, ShiftOverlapError
     
     shift_dict = shift_data.model_dump()
     shift_dict["device_id"] = device_id
@@ -358,7 +361,23 @@ async def create_shift(
     shift_create = ShiftCreate(**shift_dict)
     
     service = ShiftService(db)
-    shift = await service.create_shift(shift_create)
+    try:
+        shift = await service.create_shift(shift_create)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"success": False, "message": str(exc), "code": "SHIFT_VALIDATION_ERROR"},
+        )
+    except ShiftOverlapError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "success": False,
+                "message": str(exc),
+                "code": "SHIFT_OVERLAP_CONFLICT",
+                "conflicts": exc.conflicts,
+            },
+        )
     
     return ShiftSingleResponse(data=shift)
 
@@ -423,6 +442,8 @@ async def get_shift(
     "/{device_id}/shifts/{shift_id}",
     response_model=ShiftSingleResponse,
     responses={
+        400: {"model": ErrorResponse, "description": "Validation error"},
+        409: {"model": ErrorResponse, "description": "Shift overlap conflict"},
         404: {"model": ErrorResponse, "description": "Shift not found"},
     },
 )
@@ -434,10 +455,26 @@ async def update_shift(
     db: AsyncSession = Depends(get_db),
 ) -> ShiftSingleResponse:
     """Update an existing shift."""
-    from app.services.shift import ShiftService
+    from app.services.shift import ShiftService, ShiftOverlapError
     
     service = ShiftService(db)
-    shift = await service.update_shift(shift_id, device_id, tenant_id, shift_data)
+    try:
+        shift = await service.update_shift(shift_id, device_id, tenant_id, shift_data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"success": False, "message": str(exc), "code": "SHIFT_VALIDATION_ERROR"},
+        )
+    except ShiftOverlapError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "success": False,
+                "message": str(exc),
+                "code": "SHIFT_OVERLAP_CONFLICT",
+                "conflicts": exc.conflicts,
+            },
+        )
     
     if not shift:
         raise HTTPException(
@@ -854,6 +891,80 @@ async def sync_device_properties(
         "properties_discovered": len(properties),
         "property_names": [p.property_name for p in properties]
     }
+
+
+@router.get(
+    "/{device_id}/dashboard-widgets",
+    response_model=DashboardWidgetConfigResponse,
+    responses={404: {"model": ErrorResponse, "description": "Device not found"}},
+)
+async def get_dashboard_widgets(
+    device_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> DashboardWidgetConfigResponse:
+    """Get dashboard widget visibility configuration for a device."""
+    from app.services.device_property import DevicePropertyService
+
+    service = DevicePropertyService(db)
+    try:
+        data = await service.get_dashboard_widget_config(device_id)
+        logger.info(
+            "Dashboard widget config fetched",
+            extra={
+                "device_id": device_id,
+                "available_count": len(data.get("available_fields", [])),
+                "selected_count": len(data.get("selected_fields", [])),
+                "default_applied": data.get("default_applied", True),
+            },
+        )
+        return DashboardWidgetConfigResponse(success=True, **data)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+
+
+@router.put(
+    "/{device_id}/dashboard-widgets",
+    response_model=DashboardWidgetConfigResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Device not found"},
+        422: {"model": ErrorResponse, "description": "Invalid or unavailable fields"},
+    },
+)
+async def update_dashboard_widgets(
+    device_id: str,
+    payload: DashboardWidgetConfigUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> DashboardWidgetConfigResponse:
+    """Replace dashboard widget visibility configuration for a device."""
+    from app.services.device_property import DevicePropertyService
+
+    service = DevicePropertyService(db)
+    try:
+        data = await service.replace_dashboard_widget_config(
+            device_id=device_id,
+            selected_fields=payload.selected_fields,
+        )
+        logger.info(
+            "Dashboard widget config updated",
+            extra={
+                "device_id": device_id,
+                "selected_count": len(data.get("selected_fields", [])),
+            },
+        )
+        return DashboardWidgetConfigResponse(success=True, **data)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"success": False, "message": str(exc)},
+        )
 
 
 @router.post(

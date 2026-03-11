@@ -9,6 +9,8 @@ from app.schemas.device import (
     DeviceSingleResponse,
     DeviceDeleteResponse,
     ErrorResponse,
+    DashboardWidgetConfigUpdateRequest,
+    DashboardWidgetConfigResponse,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "DeviceSingleResponse",
     "DeviceDeleteResponse",
     "ErrorResponse",
+    "DashboardWidgetConfigUpdateRequest",
+    "DashboardWidgetConfigResponse",
 ]

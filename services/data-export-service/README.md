@@ -3,7 +3,7 @@
 Continuous telemetry export service for FactoryOPS. It reads InfluxDB telemetry and writes partitioned parquet/CSV datasets to object storage for downstream analytics/reporting.
 
 ## Base URL
-- `http://<host>:8086` (service port may vary by compose)
+- `http://<host>:8080` (compose default)
 
 ## Health Endpoints
 - `GET /health`

@@ -25,6 +25,8 @@ Device metadata, configuration, health scoring, shifts, runtime trends, and idle
 - `POST /api/v1/devices/properties/common`
 - `GET /api/v1/devices/{device_id}/properties`
 - `POST /api/v1/devices/{device_id}/properties/sync`
+- `GET /api/v1/devices/{device_id}/dashboard-widgets`
+- `PUT /api/v1/devices/{device_id}/dashboard-widgets`
 
 ### Shifts
 - `POST /api/v1/devices/{device_id}/shifts`
@@ -32,6 +34,12 @@ Device metadata, configuration, health scoring, shifts, runtime trends, and idle
 - `GET /api/v1/devices/{device_id}/shifts/{shift_id}`
 - `PUT /api/v1/devices/{device_id}/shifts/{shift_id}`
 - `DELETE /api/v1/devices/{device_id}/shifts/{shift_id}`
+
+Shift conflict behavior:
+- `POST` / `PUT` can return `409` when the candidate shift overlaps existing device shifts.
+- Touching boundaries are allowed (`end` is exclusive).
+- Validation includes all-days, day-specific, and cross-midnight shifts.
+- Rollout hygiene check (repo root): `./scripts/report_shift_overlap_conflicts.sh`
 
 ### Uptime / Performance
 - `GET /api/v1/devices/{device_id}/uptime`
@@ -94,6 +102,19 @@ Idle cost:
 - Load state (`in load/idle/unloaded/unknown`) is separate electrical-state logic.
 - UI precedence: if runtime is stopped, load badge should display Unknown.
 
+## Dashboard Widget Config Contract
+- Widget config is persisted per-device in DB (`device_dashboard_widgets`), not UI-local state.
+- `GET /dashboard-widgets` returns:
+  - `available_fields`: discovered numeric telemetry fields
+  - `selected_fields`: explicit persisted selection
+  - `effective_fields`: rendering set (selected, or fallback-all if no selection)
+  - `default_applied`: `true` when fallback-all is active
+- `PUT /dashboard-widgets` is idempotent full-replace of `selected_fields`.
+- Validation: unknown/unavailable fields are rejected with HTTP `422`.
+- Display-only filter: backend calculations and ingestion remain full-fidelity across all telemetry fields.
+
 ## Storage / Migrations
 - Uses MySQL + Alembic migrations.
 - Alembic version table in this service is namespaced (`alembic_version_device`) for single-DB deployments.
+- Startup applies migrations automatically with a guarded baseline-stamp check for legacy pre-migrated schemas.
+- Includes one-time exact-duplicate cleanup for `device_shifts` (keeps oldest row per exact key).

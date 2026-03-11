@@ -1,6 +1,6 @@
 """Shift service layer - business logic for shift management and uptime calculation."""
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict, Tuple
 from datetime import datetime, time as time_type, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,11 +17,121 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class ShiftOverlapError(Exception):
+    """Raised when a shift overlaps with existing shifts for a device."""
+
+    def __init__(self, message: str, conflicts: List[Dict[str, Any]]):
+        super().__init__(message)
+        self.conflicts = conflicts
+
+
 class ShiftService:
     """Service layer for shift management and uptime calculation."""
     
     def __init__(self, session: AsyncSession):
         self._session = session
+
+    @staticmethod
+    def _time_to_minutes(value: time_type) -> int:
+        return value.hour * 60 + value.minute
+
+    def _expand_shift_segments(
+        self,
+        shift_start: time_type,
+        shift_end: time_type,
+        day_of_week: Optional[int],
+    ) -> List[Tuple[int, int, int]]:
+        """Expand shift into daily segments with end-exclusive minute ranges.
+
+        Returns tuples of (weekday_0_mon, start_minute, end_minute).
+        """
+        start_m = self._time_to_minutes(shift_start)
+        end_m = self._time_to_minutes(shift_end)
+        if start_m == end_m:
+            raise ValueError("Shift start and end times cannot be the same")
+
+        days = list(range(7)) if day_of_week is None else [day_of_week]
+        segments: List[Tuple[int, int, int]] = []
+        for day in days:
+            if end_m > start_m:
+                segments.append((day, start_m, end_m))
+                continue
+            # Crossing midnight: [start,24:00) on start day + [00:00,end) on next day.
+            segments.append((day, start_m, 24 * 60))
+            segments.append(((day + 1) % 7, 0, end_m))
+        return segments
+
+    @staticmethod
+    def _segments_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+        # End-exclusive boundary: touching edges are valid.
+        return a_start < b_end and b_start < a_end
+
+    async def _validate_no_shift_overlap(
+        self,
+        device_id: str,
+        tenant_id: Optional[str],
+        shift_start: time_type,
+        shift_end: time_type,
+        day_of_week: Optional[int],
+        exclude_shift_id: Optional[int] = None,
+    ) -> None:
+        """Validate a candidate shift does not overlap with existing shifts."""
+        candidate_segments = self._expand_shift_segments(shift_start, shift_end, day_of_week)
+
+        query = select(DeviceShift).where(DeviceShift.device_id == device_id)
+        if tenant_id:
+            query = query.where(DeviceShift.tenant_id == tenant_id)
+        if exclude_shift_id is not None:
+            query = query.where(DeviceShift.id != exclude_shift_id)
+
+        result = await self._session.execute(query)
+        existing_shifts = list(result.scalars().all())
+
+        conflicts: List[Dict[str, Any]] = []
+        for existing in existing_shifts:
+            existing_segments = self._expand_shift_segments(
+                existing.shift_start,
+                existing.shift_end,
+                existing.day_of_week,
+            )
+            has_overlap = False
+            for c_day, c_start, c_end in candidate_segments:
+                for e_day, e_start, e_end in existing_segments:
+                    if c_day != e_day:
+                        continue
+                    if self._segments_overlap(c_start, c_end, e_start, e_end):
+                        has_overlap = True
+                        break
+                if has_overlap:
+                    break
+            if has_overlap:
+                conflicts.append(
+                    {
+                        "shift_id": existing.id,
+                        "shift_name": existing.shift_name,
+                        "day_of_week": existing.day_of_week,
+                        "shift_start": existing.shift_start.strftime("%H:%M"),
+                        "shift_end": existing.shift_end.strftime("%H:%M"),
+                        "is_active": existing.is_active,
+                    }
+                )
+
+        if conflicts:
+            logger.warning(
+                "Shift overlap rejected",
+                extra={
+                    "device_id": device_id,
+                    "tenant_id": tenant_id,
+                    "candidate_day_of_week": day_of_week,
+                    "candidate_start": shift_start.strftime("%H:%M"),
+                    "candidate_end": shift_end.strftime("%H:%M"),
+                    "conflicting_shift_ids": [c["shift_id"] for c in conflicts],
+                },
+            )
+            raise ShiftOverlapError(
+                "Shift overlaps with existing shifts for this device",
+                conflicts=conflicts,
+            )
     
     async def create_shift(self, shift_data: ShiftCreate) -> DeviceShift:
         """Create a new shift configuration for a device.
@@ -41,9 +151,17 @@ class ShiftService:
         if not device:
             raise ValueError(f"Device '{shift_data.device_id}' not found")
         
-        # Validate shift times
+        # Validate shift times / overlap constraints
         if shift_data.shift_start == shift_data.shift_end:
             raise ValueError("Shift start and end times cannot be the same")
+        await self._validate_no_shift_overlap(
+            device_id=shift_data.device_id,
+            tenant_id=shift_data.tenant_id,
+            shift_start=shift_data.shift_start,
+            shift_end=shift_data.shift_end,
+            day_of_week=shift_data.day_of_week,
+            exclude_shift_id=None,
+        )
         
         # Create shift
         shift = DeviceShift(
@@ -160,6 +278,14 @@ class ShiftService:
         # Validate shift times if updated
         if shift.shift_start == shift.shift_end:
             raise ValueError("Shift start and end times cannot be the same")
+        await self._validate_no_shift_overlap(
+            device_id=device_id,
+            tenant_id=tenant_id,
+            shift_start=shift.shift_start,
+            shift_end=shift.shift_end,
+            day_of_week=shift.day_of_week,
+            exclude_shift_id=shift_id,
+        )
         
         try:
             await self._session.commit()

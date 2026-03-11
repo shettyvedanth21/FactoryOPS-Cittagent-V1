@@ -7,7 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, and_
 from sqlalchemy.orm import selectinload
 
-from app.models.device import DeviceProperty, Device
+from app.models.device import (
+    DeviceProperty,
+    Device,
+    DeviceDashboardWidget,
+    DeviceDashboardWidgetSetting,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -212,3 +217,97 @@ class DevicePropertyService:
         await self._session.commit()
         
         return result.rowcount
+
+    async def get_dashboard_widget_config(self, device_id: str) -> Dict[str, object]:
+        """Return widget configuration for a device.
+
+        If no explicit selection exists, defaults to all discovered numeric fields.
+        """
+        device_query = select(Device).where(Device.device_id == device_id)
+        device_result = await self._session.execute(device_query)
+        if device_result.scalar_one_or_none() is None:
+            raise ValueError(f"Device '{device_id}' not found")
+
+        properties = await self.get_device_properties(device_id=device_id, numeric_only=True)
+        available_fields = sorted([p.property_name for p in properties])
+
+        widget_query = (
+            select(DeviceDashboardWidget)
+            .where(DeviceDashboardWidget.device_id == device_id)
+            .order_by(DeviceDashboardWidget.display_order.asc(), DeviceDashboardWidget.field_name.asc())
+        )
+        widget_result = await self._session.execute(widget_query)
+        selected_fields = [w.field_name for w in widget_result.scalars().all()]
+
+        settings_query = select(DeviceDashboardWidgetSetting).where(
+            DeviceDashboardWidgetSetting.device_id == device_id
+        )
+        settings_result = await self._session.execute(settings_query)
+        settings = settings_result.scalar_one_or_none()
+
+        # Backward compatibility: if legacy selected rows exist without settings row,
+        # treat them as explicit config to avoid silently reverting to default mode.
+        has_explicit_config = bool((settings and settings.is_configured) or selected_fields)
+        default_applied = not has_explicit_config
+        effective_fields = selected_fields if has_explicit_config else available_fields
+
+        return {
+            "device_id": device_id,
+            "available_fields": available_fields,
+            "selected_fields": selected_fields,
+            "effective_fields": effective_fields,
+            "default_applied": default_applied,
+        }
+
+    async def replace_dashboard_widget_config(self, device_id: str, selected_fields: List[str]) -> Dict[str, object]:
+        """Replace widget configuration for a device in an idempotent way."""
+        device_query = select(Device).where(Device.device_id == device_id)
+        device_result = await self._session.execute(device_query)
+        if device_result.scalar_one_or_none() is None:
+            raise ValueError(f"Device '{device_id}' not found")
+
+        properties = await self.get_device_properties(device_id=device_id, numeric_only=True)
+        available_fields = sorted([p.property_name for p in properties])
+        available_set = set(available_fields)
+
+        requested = [f.strip() for f in selected_fields if f and f.strip()]
+        deduped: List[str] = []
+        seen = set()
+        for field in requested:
+            if field not in seen:
+                seen.add(field)
+                deduped.append(field)
+
+        invalid_fields = sorted([field for field in deduped if field not in available_set])
+        if invalid_fields:
+            raise LookupError(f"Unknown/unavailable widget fields: {invalid_fields}")
+
+        await self._session.execute(
+            delete(DeviceDashboardWidget).where(DeviceDashboardWidget.device_id == device_id)
+        )
+        for order, field_name in enumerate(deduped):
+            self._session.add(
+                DeviceDashboardWidget(
+                    device_id=device_id,
+                    field_name=field_name,
+                    display_order=order,
+                )
+            )
+
+        settings_query = select(DeviceDashboardWidgetSetting).where(
+            DeviceDashboardWidgetSetting.device_id == device_id
+        )
+        settings_result = await self._session.execute(settings_query)
+        settings = settings_result.scalar_one_or_none()
+        if settings is None:
+            self._session.add(
+                DeviceDashboardWidgetSetting(
+                    device_id=device_id,
+                    is_configured=True,
+                )
+            )
+        else:
+            settings.is_configured = True
+
+        await self._session.commit()
+        return await self.get_dashboard_widget_config(device_id)

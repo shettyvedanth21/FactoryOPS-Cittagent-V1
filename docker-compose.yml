@@ -134,6 +134,18 @@ services:
       - INFLUXDB_BUCKET=telemetry
       - DEVICE_SERVICE_URL=http://device-service:8000
       - RULE_ENGINE_URL=http://rule-engine-service:8002
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=ai_factoryops
+      - MYSQL_USER=energy
+      - MYSQL_PASSWORD=energy
+      - DLQ_BACKEND=mysql
+      - DEVICE_SYNC_ENABLED=true
+      - DEVICE_SYNC_WORKERS=2
+      - DEVICE_SYNC_QUEUE_MAXSIZE=5000
+      - DEVICE_SYNC_MAX_RETRIES=3
+      - DEVICE_SYNC_RETRY_BACKOFF_SEC=0.5
+      - DEVICE_SYNC_RETRY_BACKOFF_MAX_SEC=5
     ports:
       - "8081:8081"
     depends_on:
