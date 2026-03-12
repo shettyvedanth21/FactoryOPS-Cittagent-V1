@@ -1,4 +1,5 @@
 import asyncio
+import re
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -37,9 +38,21 @@ class QueryResult:
 
 class QueryEngine:
     @staticmethod
+    def _strip_literals_and_comments(sql: str) -> str:
+        # Remove SQL comments and quoted literals so keyword tokenization does not
+        # false-match inside strings/comments.
+        cleaned = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        cleaned = re.sub(r"(--[^\n]*|#[^\n]*)", " ", cleaned)
+        cleaned = re.sub(r"'(?:''|[^'])*'", "''", cleaned)
+        cleaned = re.sub(r'"(?:""|[^"])*"', '""', cleaned)
+        return cleaned
+
+    @staticmethod
     def validate_sql(sql: str) -> tuple[bool, str]:
         raw = (sql or "").strip()
         upper = raw.upper()
+        cleaned = QueryEngine._strip_literals_and_comments(raw)
+        cleaned_upper = cleaned.upper()
 
         if not upper:
             return False, "Empty query"
@@ -48,14 +61,15 @@ class QueryEngine:
         if len(raw) > 4000:
             return False, "Query too long"
 
-        semicolon_count = raw.count(";")
+        semicolon_count = cleaned.count(";")
         if semicolon_count > 1:
             return False, "Multiple statements are not allowed"
         if semicolon_count == 1 and not raw.endswith(";"):
             return False, "Multiple statements are not allowed"
 
+        tokens = set(re.findall(r"\b[A-Z_][A-Z0-9_]*\b", cleaned_upper))
         for keyword in BLOCKED_KEYWORDS:
-            if keyword in upper:
+            if keyword in tokens:
                 return False, f"Blocked keyword: {keyword}"
 
         return True, "ok"

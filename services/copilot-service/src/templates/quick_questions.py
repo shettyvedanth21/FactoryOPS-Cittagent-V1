@@ -51,7 +51,8 @@ def build_templates(manifest: dict[str, Any]) -> dict[str, QuickTemplate]:
                 "FROM alerts a "
                 "JOIN devices d ON d.device_id=a.device_id "
                 "JOIN rules r ON r.rule_id=a.rule_id "
-                "WHERE DATE(a.created_at)=CURDATE() "
+                "WHERE a.created_at >= CURDATE() "
+                "AND a.created_at < DATE_ADD(CURDATE(), INTERVAL 1 DAY) "
                 "ORDER BY a.created_at DESC LIMIT 20"
             ),
             chart_type="table",

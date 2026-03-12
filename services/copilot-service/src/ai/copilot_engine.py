@@ -5,6 +5,7 @@ from collections import Counter
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -88,6 +89,8 @@ class CopilotEngine:
     ) -> CopilotResponse:
         if template.mode == "telemetry_top_energy_today":
             return await self._top_energy_today(template, tariff_rate, currency)
+        if intent == "alerts_recent":
+            return await self._run_alerts_recent(message=message, template=template)
 
         result = await self.query_engine.execute_query(template.sql)
         if result.error:
@@ -360,6 +363,114 @@ class CopilotEngine:
                 ),
                 error_code="NO_DATA",
             )
+
+    async def _run_alerts_recent(self, message: str, template) -> CopilotResponse:
+        start_str, end_str = self._today_window_factory_tz()
+        lower = message.lower()
+        wants_most = "most alerts" in lower or "highest alerts" in lower
+
+        alerts_sql = (
+            "SELECT a.device_id, d.device_name, r.rule_name, a.severity, a.status, a.created_at "
+            "FROM alerts a "
+            "JOIN devices d ON d.device_id = a.device_id "
+            "JOIN rules r ON r.rule_id = a.rule_id "
+            f"WHERE a.created_at >= '{start_str}' AND a.created_at < '{end_str}' "
+            "ORDER BY a.created_at DESC LIMIT 100"
+        )
+        alerts_result = await self.query_engine.execute_query(alerts_sql)
+        if alerts_result.error:
+            return self._blocked_response(template.allowed_followups)
+
+        source_label = "alerts"
+        base_headers = alerts_result.columns
+        base_rows = alerts_result.rows
+
+        if not base_rows:
+            activity_sql = (
+                "SELECT ae.device_id, d.device_name, COALESCE(r.rule_name, ae.title) AS rule_name, "
+                "CASE WHEN ae.event_type LIKE 'alert_%' THEN 'high' ELSE 'info' END AS severity, "
+                "ae.event_type AS status, ae.created_at "
+                "FROM activity_events ae "
+                "LEFT JOIN devices d ON d.device_id = ae.device_id "
+                "LEFT JOIN rules r ON r.rule_id = ae.rule_id "
+                f"WHERE ae.created_at >= '{start_str}' AND ae.created_at < '{end_str}' "
+                "AND (ae.event_type LIKE 'alert_%' OR ae.event_type IN ('rule_created','rule_updated','rule_triggered')) "
+                "ORDER BY ae.created_at DESC LIMIT 100"
+            )
+            activity_result = await self.query_engine.execute_query(activity_sql)
+            if activity_result.error:
+                return self._blocked_response(template.allowed_followups)
+            base_headers = activity_result.columns
+            base_rows = activity_result.rows
+            source_label = "activity_events"
+
+        if not base_rows:
+            return CopilotResponse(
+                answer="No alerts found for this period.",
+                reasoning="What happened: No alerts or related activity events were found for today.\n"
+                "Why it matters: There are no alert events requiring action in this window.\n"
+                "How calculated: Checked today’s alert records first, then fallback activity events.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="No alerts or related activity events were found for today.",
+                    why_it_matters="There are no alert events requiring action in this window.",
+                    how_calculated="Checked today’s alert records first, then fallback activity events.",
+                ),
+                follow_up_suggestions=self._validated_followups(template.allowed_followups),
+                error_code="NO_DATA",
+            )
+
+        if wants_most:
+            grouped: dict[str, int] = {}
+            for row in base_rows:
+                if len(row) < 2:
+                    continue
+                machine = str(row[1] or row[0] or "Unknown")
+                grouped[machine] = grouped.get(machine, 0) + 1
+            ranked = sorted(grouped.items(), key=lambda x: x[1], reverse=True)
+            table_rows = [[name, count, source_label] for name, count in ranked[:20]]
+            top_machine, top_count = ranked[0]
+            source_text = "alerts" if source_label == "alerts" else "activity events"
+            reasoning_sections = ReasoningSections(
+                what_happened=f"{top_machine} has the highest count today with {top_count} {source_text}.",
+                why_it_matters="This highlights the machine that may need immediate root-cause attention.",
+                how_calculated=f"Grouped today's {source_text} by machine and ranked by count.",
+            )
+            return CopilotResponse(
+                answer=f"{top_machine} has the most {source_text} today ({top_count}).",
+                reasoning=self._sections_to_text(reasoning_sections),
+                reasoning_sections=reasoning_sections,
+                data_table=DataTable(headers=["Machine", "Count", "Source"], rows=table_rows),
+                chart=Chart(
+                    type="bar",
+                    title="Alert Count Today by Machine",
+                    labels=[r[0] for r in table_rows],
+                    datasets=[ChartDataset(label="Count", data=[int(r[1]) for r in table_rows])],
+                ),
+                follow_up_suggestions=self._validated_followups(
+                    ["Show unresolved alerts only", "Show recent alerts for this machine", "Summarize today's factory performance"]
+                ),
+            )
+
+        source_text = "alerts" if source_label == "alerts" else "activity events"
+        if source_label == "alerts":
+            answer = f"Found {len(base_rows)} alert(s) for today."
+            what = f"Found {len(base_rows)} alert(s) for today."
+        else:
+            answer = f"No alerts found today; showing {len(base_rows)} recent activity event(s)."
+            what = f"No alerts found today; showing {len(base_rows)} recent activity event(s)."
+        reasoning_sections = ReasoningSections(
+            what_happened=what,
+            why_it_matters="This keeps your operations view complete even when no direct alert records exist.",
+            how_calculated=f"Queried today's alerts first, then used {source_text} fallback for the same time window.",
+        )
+        return CopilotResponse(
+            answer=answer,
+            reasoning=self._sections_to_text(reasoning_sections),
+            reasoning_sections=reasoning_sections,
+            data_table=DataTable(headers=base_headers, rows=base_rows[:50]),
+            chart=None,
+            follow_up_suggestions=self._validated_followups(template.allowed_followups),
+        )
 
     async def _run_ai_sql(
         self,
@@ -703,6 +814,18 @@ class CopilotEngine:
                 if device_name and device_name in hay_upper:
                     return device_id
         return None
+
+    @staticmethod
+    def _today_window_factory_tz() -> tuple[str, str]:
+        tz_name = settings.factory_timezone or "Asia/Kolkata"
+        try:
+            local_tz = ZoneInfo(tz_name)
+        except Exception:
+            local_tz = ZoneInfo("Asia/Kolkata")
+        now_local = datetime.now(local_tz)
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_local = start_local + timedelta(days=1)
+        return start_local.strftime("%Y-%m-%d %H:%M:%S"), end_local.strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def _source_tables_for_intent(intent: str) -> list[str]:

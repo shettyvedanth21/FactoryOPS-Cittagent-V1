@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     )
     data_service_url: str = Field(default="http://data-service:8081")
     reporting_service_url: str = Field(default="http://reporting-service:8085")
+    factory_timezone: str = Field(default="Asia/Kolkata")
 
     max_query_rows: int = Field(default=200)
     query_timeout_sec: int = Field(default=10)

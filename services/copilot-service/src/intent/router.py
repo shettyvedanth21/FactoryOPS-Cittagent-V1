@@ -11,7 +11,7 @@ INTENT_PATTERNS: dict[str, list[str]] = {
     "unsupported": ["oee", "overall equipment effectiveness", "yield", "production count"],
     "top_energy_today": ["most power today", "most energy today", "consumed the most power", "top energy consumers"],
     "factory_summary": ["summarize", "factory performance", "overview today", "top problems"],
-    "alerts_recent": ["recent alerts", "alerts today", "rules triggered", "anomalies today"],
+    "alerts_recent": ["recent alerts", "alerts today", "rules triggered", "anomalies today", "most alerts"],
     "idle_waste": ["idle cost", "idle running", "standby loss", "waste energy"],
     "health_scores": ["health score", "lowest efficiency", "below 80% efficiency"],
     "telemetry_trend": ["trend", "last 30 days", "spike", "at 3pm", "over time", "yesterday"],
