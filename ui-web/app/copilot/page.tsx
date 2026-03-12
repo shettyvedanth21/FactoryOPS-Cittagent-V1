@@ -137,7 +137,24 @@ export default function CopilotPage() {
                     <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-white p-4">
                       <div className="rounded-md bg-slate-50 p-3 text-sm text-slate-700">
                         <div className="mb-1 font-medium text-slate-900">Reasoning</div>
-                        <div>{msg.response.reasoning}</div>
+                        {msg.response.reasoning_sections ? (
+                          <div className="space-y-2">
+                            <div>
+                              <div className="font-medium text-slate-900">What happened</div>
+                              <div>{msg.response.reasoning_sections.what_happened}</div>
+                            </div>
+                            <div>
+                              <div className="font-medium text-slate-900">Why it matters</div>
+                              <div>{msg.response.reasoning_sections.why_it_matters}</div>
+                            </div>
+                            <div>
+                              <div className="font-medium text-slate-900">How calculated</div>
+                              <div>{msg.response.reasoning_sections.how_calculated}</div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="whitespace-pre-line">{msg.response.reasoning}</div>
+                        )}
                       </div>
 
                       {msg.response.data_table && (

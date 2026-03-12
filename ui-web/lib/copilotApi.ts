@@ -8,6 +8,11 @@ export interface ChatTurn {
 export interface CopilotResponse {
   answer: string;
   reasoning: string;
+  reasoning_sections?: {
+    what_happened: string;
+    why_it_matters: string;
+    how_calculated: string;
+  } | null;
   data_table?: {
     headers: string[];
     rows: Array<Array<string | number | null>>;

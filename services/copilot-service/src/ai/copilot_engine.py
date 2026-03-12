@@ -10,13 +10,14 @@ from sqlalchemy import text
 
 from src.ai.model_client import AIUnavailableError, ModelClient
 from src.ai.prompt_templates import FORMATTER_SYSTEM_PROMPT, SQL_SYSTEM_PROMPT
+from src.ai.reasoning_composer import ReasoningComposer
 from src.config import settings
 from src.database import get_db_session
 from src.db.query_engine import QueryEngine
 from src.db.schema_loader import get_schema_context, get_schema_manifest
 from src.integrations.data_service_client import DataServiceClient
 from src.intent.router import QUICK_INTENTS, classify_intent, is_answerable_followup
-from src.response.schema import Chart, ChartDataset, CopilotResponse, DataTable, PageLink
+from src.response.schema import Chart, ChartDataset, CopilotResponse, DataTable, PageLink, ReasoningSections
 from src.templates.quick_questions import build_templates
 
 
@@ -41,9 +42,11 @@ class CopilotEngine:
         intent = classify_intent(message, history)
 
         if intent.intent == "unsupported":
+            unsupported = ReasoningComposer.for_unsupported_module()
             return CopilotResponse(
-                answer="That module is not yet available in FactoryOPS.",
-                reasoning="Requested module is outside currently integrated FactoryOPS data modules.",
+                answer=unsupported.answer,
+                reasoning=unsupported.text,
+                reasoning_sections=unsupported.sections,
                 follow_up_suggestions=[
                     "Summarize today's factory performance",
                     "Which machine consumed the most power today?",
@@ -88,15 +91,18 @@ class CopilotEngine:
 
         result = await self.query_engine.execute_query(template.sql)
         if result.error:
-            return CopilotResponse(
-                answer="That question cannot be answered safely.",
-                reasoning=f"Query blocked due to safety policy: {result.reason}",
-                error_code=result.error,
-            )
+            return self._blocked_response(template.allowed_followups)
         if not result.rows:
             return CopilotResponse(
                 answer="No data found for this period.",
-                reasoning="Template query returned zero rows for the requested time window.",
+                reasoning="What happened: No matching records were found for this period.\n"
+                "Why it matters: There is nothing actionable in the selected time window.\n"
+                "How calculated: Checked current FactoryOPS data for your selected period.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="No matching records were found for this period.",
+                    why_it_matters="There is nothing actionable in the selected time window.",
+                    how_calculated="Checked current FactoryOPS data for your selected period.",
+                ),
                 follow_up_suggestions=self._validated_followups(template.allowed_followups),
                 error_code="NO_DATA",
             )
@@ -126,16 +132,9 @@ class CopilotEngine:
         )
         if not deterministic_chart and chart_build_reason:
             COPILOT_METRICS["chart_build_failed"] += 1
-            reasoning = (
-                f"Source: ai_factoryops ({','.join(self._source_tables_for_intent(intent))}); "
-                "Window: today; Metric: template-specific aggregate; Filters: template intent constraints. "
-                f"Chart omitted: {chart_build_reason}"
-            )
+            reasoning = f"Chart omitted: {chart_build_reason}"
         else:
-            reasoning = (
-                f"Source: ai_factoryops ({','.join(self._source_tables_for_intent(intent))}); "
-                "Window: today; Metric: template-specific aggregate; Filters: template intent constraints."
-            )
+            reasoning = ""
 
         return await self._format_with_ai_or_fallback(
             message=message,
@@ -148,6 +147,7 @@ class CopilotEngine:
             currency=currency,
             force_chart=deterministic_chart,
             chart_omission_reason=chart_build_reason if deterministic_chart is None else None,
+            intent=intent,
         )
 
     async def _top_energy_today(self, template, tariff_rate: float, currency: str) -> CopilotResponse:
@@ -155,7 +155,14 @@ class CopilotEngine:
         if not devices:
             return CopilotResponse(
                 answer="No data found for this period.",
-                reasoning="No onboarded devices found in devices table.",
+                reasoning="What happened: No onboarded devices were found.\n"
+                "Why it matters: I cannot compare machine energy without active devices.\n"
+                "How calculated: Checked the devices list available in FactoryOPS.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="No onboarded devices were found.",
+                    why_it_matters="I cannot compare machine energy without active devices.",
+                    how_calculated="Checked the devices list available in FactoryOPS.",
+                ),
                 error_code="NO_DATA",
             )
 
@@ -213,7 +220,14 @@ class CopilotEngine:
         if not rows:
             return CopilotResponse(
                 answer="No data found for this period.",
-                reasoning="Telemetry endpoint returned insufficient energy_kwh/power points for all devices today.",
+                reasoning="What happened: Telemetry did not have enough points to calculate energy today.\n"
+                "Why it matters: Without enough points, machine ranking would be unreliable.\n"
+                "How calculated: Tried energy_kwh delta first, then power integration fallback per device.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="Telemetry did not have enough points to calculate energy today.",
+                    why_it_matters="Without enough points, machine ranking would be unreliable.",
+                    how_calculated="Tried energy_kwh delta first, then power integration fallback per device.",
+                ),
                 error_code="NO_DATA",
             )
 
@@ -228,11 +242,10 @@ class CopilotEngine:
             f"{top[1]} consumed the most energy today at {top[2]} kWh"
             + (f" ({currency} {top[3]:.2f})." if isinstance(top[3], (int, float)) else ".")
         )
-        reasoning = (
-            "Source: data-service telemetry (energy_kwh with power integration fallback) + devices table; "
-            "Window: today (UTC start-of-day to now); "
-            "Metric: max(energy_kwh)-min(energy_kwh) or integrated power over time per device; "
-            "Filters: onboarded devices only."
+        reasoning_sections = ReasoningSections(
+            what_happened=f"Today, {top[1]} consumed the most energy at {top[2]} kWh.",
+            why_it_matters="This highlights the best machine to target first for immediate energy savings.",
+            how_calculated="Compared today’s telemetry per machine using energy_kwh delta with power integration fallback.",
         )
         chart = Chart(
             type="bar",
@@ -249,7 +262,8 @@ class CopilotEngine:
 
         return CopilotResponse(
             answer=answer,
-            reasoning=reasoning,
+            reasoning=self._sections_to_text(reasoning_sections),
+            reasoning_sections=reasoning_sections,
             data_table=DataTable(
                 headers=["Machine", "kWh", f"Cost {currency}", "% of Total"],
                 rows=table_rows,
@@ -264,7 +278,14 @@ class CopilotEngine:
         if not device_id:
             return CopilotResponse(
                 answer="Please specify a device to analyze trend data.",
-                reasoning="Telemetry trend intents require an explicit or contextual device identifier.",
+                reasoning="What happened: I couldn't identify a machine for this trend request.\n"
+                "Why it matters: Trend analysis needs a specific machine context.\n"
+                "How calculated: Checked your current message and recent chat context for machine names.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="I couldn't identify a machine for this trend request.",
+                    why_it_matters="Trend analysis needs a specific machine context.",
+                    how_calculated="Checked your current message and recent chat context for machine names.",
+                ),
                 error_code="NO_DATA",
             )
 
@@ -284,20 +305,29 @@ class CopilotEngine:
             if not points:
                 return CopilotResponse(
                     answer="No data found for this period.",
-                    reasoning=f"No power telemetry points returned for device {device_id} in the last 7 days.",
+                    reasoning=f"What happened: No power telemetry points were available for {device_id} in the last 7 days.\n"
+                    "Why it matters: Trend analysis needs timestamped telemetry points.\n"
+                    "How calculated: Queried the data-service trend endpoint for the selected machine and time range.",
+                    reasoning_sections=ReasoningSections(
+                        what_happened=f"No power telemetry points were available for {device_id} in the last 7 days.",
+                        why_it_matters="Trend analysis needs timestamped telemetry points.",
+                        how_calculated="Queried the data-service trend endpoint for the selected machine and time range.",
+                    ),
                     error_code="NO_DATA",
                 )
 
             labels = [str(p.get("timestamp", ""))[:16] for p in points]
             values = [float(p.get("power")) for p in points]
             answer = f"Showing power trend for {device_id} over the last 7 days."
-            reasoning = (
-                "Source: data-service telemetry endpoint; "
-                "Window: last 7 days; Metric: power field points; Filters: selected device."
+            reasoning_sections = ReasoningSections(
+                what_happened=f"Showing power trend for {device_id} over the last 7 days.",
+                why_it_matters="This helps you spot spikes, instability, and recurring load patterns.",
+                how_calculated="Used the machine's timestamped power telemetry from the last 7 days.",
             )
             return CopilotResponse(
                 answer=answer,
-                reasoning=reasoning,
+                reasoning=self._sections_to_text(reasoning_sections),
+                reasoning_sections=reasoning_sections,
                 data_table=DataTable(
                     headers=["Timestamp", "Power"],
                     rows=[[labels[i], values[i]] for i in range(min(len(labels), 30))],
@@ -320,7 +350,14 @@ class CopilotEngine:
         except Exception as exc:
             return CopilotResponse(
                 answer="No data found for this period.",
-                reasoning=f"Telemetry fetch failed: {exc}",
+                reasoning="What happened: Trend data could not be fetched right now.\n"
+                "Why it matters: Without fresh telemetry, I cannot produce a reliable trend.\n"
+                "How calculated: Attempted to fetch telemetry for the selected machine and time range.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="Trend data could not be fetched right now.",
+                    why_it_matters="Without fresh telemetry, I cannot produce a reliable trend.",
+                    how_calculated="Attempted to fetch telemetry for the selected machine and time range.",
+                ),
                 error_code="NO_DATA",
             )
 
@@ -354,28 +391,51 @@ class CopilotEngine:
         except AIUnavailableError:
             return CopilotResponse(
                 answer="AI service is temporarily unavailable. Please try again.",
-                reasoning="Provider call failed during query generation stage.",
+                reasoning="What happened: AI query generation is temporarily unavailable.\n"
+                "Why it matters: I could not safely translate your question into a query.\n"
+                "How calculated: Provider request failed during query generation.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="AI query generation is temporarily unavailable.",
+                    why_it_matters="I could not safely translate your question into a query.",
+                    how_calculated="Provider request failed during query generation.",
+                ),
                 error_code="AI_UNAVAILABLE",
             )
 
         if sql.upper() == "NO_DATA":
             return CopilotResponse(
                 answer="No data found for this period.",
-                reasoning="Query generation determined no reliable schema path for this request.",
+                reasoning="What happened: I could not find a reliable data path for this question.\n"
+                "Why it matters: Returning guessed numbers would be misleading.\n"
+                "How calculated: Matched your question against current FactoryOPS schema and available modules.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="I could not find a reliable data path for this question.",
+                    why_it_matters="Returning guessed numbers would be misleading.",
+                    how_calculated="Matched your question against current FactoryOPS schema and available modules.",
+                ),
                 error_code="NO_DATA",
             )
 
         result = await self.query_engine.execute_query(sql)
         if result.error:
-            return CopilotResponse(
-                answer="That question cannot be answered safely.",
-                reasoning=f"SQL safety validator blocked execution: {result.reason}",
-                error_code=result.error,
+            return self._blocked_response(
+                [
+                    "Summarize today's factory performance",
+                    "Which machine consumed the most power today?",
+                    "Show recent alerts today",
+                ]
             )
         if not result.rows:
             return CopilotResponse(
                 answer="No data found for this period.",
-                reasoning="Generated SQL returned zero rows.",
+                reasoning="What happened: No matching records were found.\n"
+                "Why it matters: There is no data to conclude on this request for the selected period.\n"
+                "How calculated: Ran a safe read-only query using current FactoryOPS schema.",
+                reasoning_sections=ReasoningSections(
+                    what_happened="No matching records were found.",
+                    why_it_matters="There is no data to conclude on this request for the selected period.",
+                    how_calculated="Ran a safe read-only query using current FactoryOPS schema.",
+                ),
                 error_code="NO_DATA",
             )
 
@@ -388,7 +448,7 @@ class CopilotEngine:
         return await self._format_with_ai_or_fallback(
             message=message,
             payload=payload,
-            reasoning="Source: ai_factoryops MySQL query; Window/metric/filters based on generated SQL.",
+            reasoning="",
             chart_hint="table",
             default_title="Query Results",
             default_followups=[
@@ -398,6 +458,7 @@ class CopilotEngine:
             ],
             tariff_rate=tariff_rate,
             currency=currency,
+            intent="ai_sql",
         )
 
     async def _format_with_ai_or_fallback(
@@ -412,10 +473,18 @@ class CopilotEngine:
         currency: str,
         force_chart: Chart | None = None,
         chart_omission_reason: str | None = None,
+        intent: str = "ai_sql",
     ) -> CopilotResponse:
         headers = payload.get("columns") or []
         rows = payload.get("rows") or []
         forced_table = DataTable(headers=headers, rows=rows[:50]) if headers and rows else None
+        composed = ReasoningComposer.for_query_result(
+            intent=intent,
+            message=message,
+            columns=headers,
+            rows=rows,
+            chart_omission_reason=chart_omission_reason,
+        )
         try:
             formatted_raw = await self.model_client.generate(
                 messages=[
@@ -442,17 +511,24 @@ class CopilotEngine:
             elif chart_omission_reason:
                 response.chart = None
             if not response.reasoning:
-                response.reasoning = reasoning
+                response.reasoning = composed.text if not reasoning else reasoning
+            if not response.reasoning_sections:
+                response.reasoning_sections = composed.sections
             if chart_omission_reason and chart_omission_reason not in response.reasoning:
                 response.reasoning = f"{response.reasoning} Chart omitted: {chart_omission_reason}"
+            if self._looks_technical(response.answer):
+                response.answer = composed.answer
+            if self._looks_technical(response.reasoning):
+                response.reasoning = composed.text
             response.chart = self._sanitize_chart(response.chart)
             return response
         except json.JSONDecodeError as exc:
             COPILOT_METRICS["formatter_parse_failed"] += 1
             logger.warning("copilot_formatter_parse_failed error=%s", exc)
             return CopilotResponse(
-                answer=self._fallback_answer(rows),
-                reasoning=self._append_chart_omission(reasoning, chart_omission_reason),
+                answer=composed.answer,
+                reasoning=self._append_chart_omission(composed.text if not reasoning else reasoning, chart_omission_reason),
+                reasoning_sections=composed.sections,
                 data_table=forced_table,
                 chart=force_chart or self._fallback_chart(headers, rows, default_title, chart_hint),
                 follow_up_suggestions=self._validated_followups(default_followups),
@@ -461,8 +537,9 @@ class CopilotEngine:
             COPILOT_METRICS["formatter_parse_failed"] += 1
             logger.warning("copilot_formatter_validation_failed error=%s", exc)
             return CopilotResponse(
-                answer=self._fallback_answer(rows),
-                reasoning=self._append_chart_omission(reasoning, chart_omission_reason),
+                answer=composed.answer,
+                reasoning=self._append_chart_omission(composed.text if not reasoning else reasoning, chart_omission_reason),
+                reasoning_sections=composed.sections,
                 data_table=forced_table,
                 chart=force_chart or self._fallback_chart(headers, rows, default_title, chart_hint),
                 follow_up_suggestions=self._validated_followups(default_followups),
@@ -472,8 +549,7 @@ class CopilotEngine:
     def _fallback_answer(rows: list[list[Any]]) -> str:
         if not rows:
             return "No data found for this period."
-        first = rows[0]
-        return f"Found {len(rows)} records. Top row: {first}."
+        return f"I found {len(rows)} matching records and highlighted the top result for quick review."
 
     @staticmethod
     def _fallback_chart(headers: list[str], rows: list[list[Any]], title: str, chart_hint: str) -> Chart | None:
@@ -640,12 +716,56 @@ class CopilotEngine:
 
     def _validated_followups(self, candidates: list[str]) -> list[str]:
         out: list[str] = []
+        seen: set[str] = set()
         for candidate in candidates:
-            if candidate and is_answerable_followup(candidate):
-                out.append(candidate)
+            normalized = candidate.strip() if candidate else ""
+            dedupe_key = normalized.lower()
+            if normalized and dedupe_key not in seen and is_answerable_followup(normalized):
+                seen.add(dedupe_key)
+                out.append(normalized)
             if len(out) == 3:
                 break
         return out
+
+    @staticmethod
+    def _looks_technical(value: str | None) -> bool:
+        if not value:
+            return False
+        lowered = value.lower()
+        technical_tokens = [
+            "decimal(",
+            "datetime.datetime(",
+            "top row: [",
+            "source: ai_factoryops",
+            "template-specific aggregate",
+            "filters: template intent constraints",
+        ]
+        return any(token in lowered for token in technical_tokens)
+
+    @staticmethod
+    def _sections_to_text(sections: ReasoningSections) -> str:
+        return (
+            f"What happened: {sections.what_happened}\n"
+            f"Why it matters: {sections.why_it_matters}\n"
+            f"How calculated: {sections.how_calculated}"
+        )
+
+    def _blocked_response(self, suggested_followups: list[str]) -> CopilotResponse:
+        blocked = ReasoningComposer.for_blocked_query()
+        return CopilotResponse(
+            answer=blocked.answer,
+            reasoning=blocked.text,
+            reasoning_sections=blocked.sections,
+            follow_up_suggestions=self._validated_followups(
+                suggested_followups
+                or [
+                    "Summarize today's factory performance",
+                    "Which machine consumed the most power today?",
+                    "Show recent alerts today",
+                ]
+            ),
+            error_code="QUERY_BLOCKED",
+        )
 
     async def _list_devices(self) -> list[dict[str, Any]]:
         async with get_db_session() as db:

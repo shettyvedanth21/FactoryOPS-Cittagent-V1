@@ -25,6 +25,12 @@ class PageLink(BaseModel):
     route: str
 
 
+class ReasoningSections(BaseModel):
+    what_happened: str
+    why_it_matters: str
+    how_calculated: str
+
+
 class ChatTurn(BaseModel):
     role: str
     content: str
@@ -38,6 +44,7 @@ class ChatRequest(BaseModel):
 class CopilotResponse(BaseModel):
     answer: str
     reasoning: str
+    reasoning_sections: Optional[ReasoningSections] = None
     data_table: Optional[DataTable] = None
     chart: Optional[Chart] = None
     page_links: Optional[List[PageLink]] = None
