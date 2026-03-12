@@ -313,6 +313,29 @@ services:
     networks:
       - energy-net
 
+  copilot-service:
+    build: ./services/copilot-service
+    container_name: copilot-service
+    env_file:
+      - .env
+    environment:
+      - MYSQL_URL=mysql+aiomysql://copilot_reader:${COPILOT_DB_PASSWORD:-copilot_readonly_pass}@mysql:3306/ai_factoryops
+      - DATA_SERVICE_URL=http://data-service:8081
+      - REPORTING_SERVICE_URL=http://reporting-service:8085
+      - MAX_QUERY_ROWS=200
+      - QUERY_TIMEOUT_SEC=10
+    ports:
+      - "8007:8007"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      data-service:
+        condition: service_started
+      reporting-service:
+        condition: service_started
+    networks:
+      - energy-net
+
   ui-web:
     build: ./ui-web
     container_name: ui-web
@@ -325,6 +348,7 @@ services:
       - analytics-service
       - data-export-service
       - waste-analysis-service
+      - copilot-service
     networks:
       - energy-net
     environment:

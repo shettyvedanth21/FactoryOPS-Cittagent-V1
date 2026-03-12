@@ -31,6 +31,10 @@ const nextConfig: NextConfig = {
         source: "/backend/reporting/:path*",
         destination: "http://reporting-service:8085/:path*",
       },
+      {
+        source: "/backend/copilot/:path*",
+        destination: "http://copilot-service:8007/:path*",
+      },
 
       // reporting-service
       {

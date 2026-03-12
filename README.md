@@ -6,7 +6,7 @@ Production setup and operations guide for first-time deployment, migrations, dev
 
 ### Prerequisites
 - Docker + Docker Compose v2
-- Port availability: `3000, 8000, 8002, 8003, 8080, 8081, 8085, 8086, 9000, 9001, 1883, 3306`
+- Port availability: `3000, 8000, 8002, 8003, 8007, 8080, 8081, 8085, 8086, 9000, 9001, 1883, 3306`
 
 ### Step 1: Configure environment
 ```bash
@@ -43,6 +43,7 @@ curl -s http://localhost:8000/health
 curl -s http://localhost:8081/api/v1/data/health
 curl -s http://localhost:8002/health
 curl -s http://localhost:8085/health
+curl -s http://localhost:8007/health
 ```
 
 UI should be available at: `http://localhost:3000`
@@ -69,6 +70,7 @@ Runtime smoke check:
 | Device Service | `http://localhost:8000` |
 | Rule Engine Service | `http://localhost:8002` |
 | Analytics Service | `http://localhost:8003` |
+| Copilot Service | `http://localhost:8007` |
 | Data Export Service | `http://localhost:8080` |
 | Data Service | `http://localhost:8081` |
 | Reporting Service | `http://localhost:8085` |
