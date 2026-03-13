@@ -17,4 +17,8 @@ until alembic upgrade head; do
 done
 
 echo "Starting analytics-service..."
+if [ "${APP_ROLE:-api}" = "worker" ]; then
+  exec python -m src.worker_main
+fi
+
 exec uvicorn src.main:app --host 0.0.0.0 --port 8003

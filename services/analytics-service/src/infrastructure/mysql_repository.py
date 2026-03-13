@@ -8,9 +8,9 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.database import AnalyticsJob
+from src.models.database import AnalyticsJob, ModelArtifact
 from src.models.schemas import JobStatus
-from src.services.result_repository import ResultRepository
+from src.services.result_repository import ResultRepository, UNSET
 from src.utils.exceptions import JobNotFoundError
 
 logger = structlog.get_logger()
@@ -33,6 +33,12 @@ class MySQLResultRepository(ResultRepository):
             if math.isnan(value) or math.isinf(value):
                 return None
             return value
+
+        if hasattr(value, "tolist") and not isinstance(value, (str, bytes, bytearray)):
+            try:
+                return self._sanitize_json(value.tolist())
+            except Exception:
+                pass
 
         if isinstance(value, list):
             return [self._sanitize_json(v) for v in value]
@@ -171,5 +177,100 @@ class MySQLResultRepository(ResultRepository):
         result = await self._session.execute(query)
         return list(result.scalars().all())
 
+    async def update_job_queue_metadata(
+        self,
+        job_id: str,
+        attempt: Optional[int] = None,
+        queue_position: Optional[int] = None,
+        queue_enqueued_at: Optional[datetime] | object = UNSET,
+        queue_started_at: Optional[datetime] | object = UNSET,
+        worker_lease_expires_at: Optional[datetime] | object = UNSET,
+        last_heartbeat_at: Optional[datetime] | object = UNSET,
+        error_code: Optional[str] | object = UNSET,
+    ) -> None:
+        job = await self.get_job(job_id)
+
+        if attempt is not None:
+            job.attempt = int(attempt)
+        if queue_position is not None:
+            job.queue_position = int(queue_position)
+        if queue_enqueued_at is not UNSET:
+            job.queue_enqueued_at = queue_enqueued_at
+        if queue_started_at is not UNSET:
+            job.queue_started_at = queue_started_at
+        if worker_lease_expires_at is not UNSET:
+            job.worker_lease_expires_at = worker_lease_expires_at
+        if last_heartbeat_at is not UNSET:
+            job.last_heartbeat_at = last_heartbeat_at
+        if error_code is not UNSET:
+            job.error_code = error_code
+
+        await self._session.commit()
+
     async def rollback(self) -> None:
         await self._session.rollback()
+
+    async def get_model_artifact(
+        self,
+        device_id: str,
+        analysis_type: str,
+        model_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        result = await self._session.execute(
+            select(ModelArtifact)
+            .where(ModelArtifact.device_id == device_id)
+            .where(ModelArtifact.analysis_type == analysis_type)
+            .where(ModelArtifact.model_key == model_key)
+            .order_by(ModelArtifact.updated_at.desc())
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if not row:
+            return None
+        return {
+            "feature_schema_hash": row.feature_schema_hash,
+            "artifact_payload": row.artifact_payload,
+            "model_version": row.model_version,
+            "metrics": row.metrics or {},
+            "updated_at": row.updated_at,
+        }
+
+    async def upsert_model_artifact(
+        self,
+        device_id: str,
+        analysis_type: str,
+        model_key: str,
+        feature_schema_hash: str,
+        artifact_payload: bytes,
+        model_version: str = "v1",
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not artifact_payload:
+            return
+
+        existing = await self._session.execute(
+            select(ModelArtifact)
+            .where(ModelArtifact.device_id == device_id)
+            .where(ModelArtifact.analysis_type == analysis_type)
+            .where(ModelArtifact.model_key == model_key)
+            .where(ModelArtifact.feature_schema_hash == feature_schema_hash)
+            .limit(1)
+        )
+        artifact = existing.scalar_one_or_none()
+        if artifact is None:
+            artifact = ModelArtifact(
+                device_id=device_id,
+                analysis_type=analysis_type,
+                model_key=model_key,
+                feature_schema_hash=feature_schema_hash,
+                model_version=model_version,
+                artifact_payload=artifact_payload,
+                metrics=self._sanitize_json(metrics),
+            )
+            self._session.add(artifact)
+        else:
+            artifact.model_version = model_version
+            artifact.artifact_payload = artifact_payload
+            artifact.metrics = self._sanitize_json(metrics)
+
+        await self._session.commit()

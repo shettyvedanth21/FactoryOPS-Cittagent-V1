@@ -4,7 +4,7 @@ from typing import List
 
 import aioboto3
 import structlog
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 
 from src.config.settings import get_settings
 
@@ -69,11 +69,26 @@ class S3Client:
                     Key=key,
                 )
                 return True
+            except NoCredentialsError:
+                self._logger.warning(
+                    "s3_credentials_missing_on_head",
+                    bucket=self._bucket,
+                    key=key,
+                )
+                return False
             except ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code", "")
                 if code in {"NoSuchKey", "404", "NotFound"}:
                     return False
                 raise
+            except Exception as exc:
+                self._logger.warning(
+                    "s3_head_failed",
+                    bucket=self._bucket,
+                    key=key,
+                    error=str(exc),
+                )
+                return False
 
     async def list_objects(
         self,
@@ -88,6 +103,13 @@ class S3Client:
                     Prefix=prefix,
                     MaxKeys=max_keys,
                 )
+            except NoCredentialsError:
+                self._logger.warning(
+                    "s3_credentials_missing_on_list",
+                    bucket=self._bucket,
+                    prefix=prefix,
+                )
+                return []
             except ClientError as exc:
                 error_code = exc.response.get("Error", {}).get("Code", "")
                 if error_code == "NoSuchBucket":
@@ -98,6 +120,14 @@ class S3Client:
                     )
                     return []
                 raise
+            except Exception as exc:
+                self._logger.warning(
+                    "s3_list_failed",
+                    bucket=self._bucket,
+                    prefix=prefix,
+                    error=str(exc),
+                )
+                return []
 
             objects = response.get("Contents", [])
 

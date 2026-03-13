@@ -7,6 +7,10 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 
+class AppBaseModel(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+
 class AnalyticsType(str, Enum):
     ANOMALY = "anomaly"
     PREDICTION = "prediction"
@@ -20,7 +24,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
-class AnalyticsRequest(BaseModel):
+class AnalyticsRequest(AppBaseModel):
     """
     Analytics job request.
 
@@ -60,13 +64,13 @@ class AnalyticsRequest(BaseModel):
         return self
 
 
-class AnalyticsJobResponse(BaseModel):
+class AnalyticsJobResponse(AppBaseModel):
     job_id: str
     status: JobStatus
     message: str
 
 
-class FleetAnalyticsRequest(BaseModel):
+class FleetAnalyticsRequest(AppBaseModel):
     """Fleet analytics request for strict all-device orchestration."""
 
     device_ids: List[str] = Field(default_factory=list)
@@ -83,7 +87,7 @@ class FleetAnalyticsRequest(BaseModel):
         return self
 
 
-class JobStatusResponse(BaseModel):
+class JobStatusResponse(AppBaseModel):
     job_id: str
     status: JobStatus
     progress: Optional[float] = Field(None, ge=0, le=100)
@@ -91,13 +95,17 @@ class JobStatusResponse(BaseModel):
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    queue_position: Optional[int] = None
+    attempt: Optional[int] = None
+    worker_lease_expires_at: Optional[datetime] = None
+    estimated_wait_seconds: Optional[int] = None
 
 
 # ---------------------------------------------------------
 # PERMANENT METRICS CONTRACT
 # ---------------------------------------------------------
 
-class AccuracyMetrics(BaseModel):
+class AccuracyMetrics(AppBaseModel):
     # shared / generic
     accuracy: Optional[float] = None
 
@@ -119,7 +127,7 @@ class AccuracyMetrics(BaseModel):
     mean_predicted: Optional[float] = None
 
 
-class AnalyticsResultsResponse(BaseModel):
+class AnalyticsResultsResponse(AppBaseModel):
     job_id: str
     status: JobStatus
     device_id: str
@@ -138,13 +146,14 @@ class AnalyticsResultsResponse(BaseModel):
     completed_at: Optional[datetime] = None
 
 
-class SupportedModelsResponse(BaseModel):
+class SupportedModelsResponse(AppBaseModel):
     anomaly_detection: List[str]
     failure_prediction: List[str]
     forecasting: List[str]
+    ensembles: Optional[List[Dict[str, Any]]] = None
 
 
-class ErrorResponse(BaseModel):
+class ErrorResponse(AppBaseModel):
     success: bool = False
     error: Dict[str, Any]
     timestamp: datetime = Field(default_factory=datetime.utcnow)

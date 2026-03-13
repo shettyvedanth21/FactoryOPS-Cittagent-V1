@@ -18,6 +18,9 @@ class ResultFormatter:
         sensitivity: str,
         lookback_days: int,
         metadata: Dict[str, Any] | None = None,
+        ensemble: Dict[str, Any] | None = None,
+        reasoning: Dict[str, Any] | None = None,
+        data_quality_flags: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         total_anomalies = len(anomaly_details)
         anomaly_rate = round((total_anomalies / total_points * 100) if total_points > 0 else 0.0, 2)
@@ -104,6 +107,29 @@ class ResultFormatter:
         confidence = get_confidence(points_for_conf, sensitivity).to_dict()
         days_analyzed = float((metadata or {}).get("days_available", lookback_days))
         gauge_color = "green" if anomaly_rate < 3.0 else "amber" if anomaly_rate < 7.0 else "red"
+        ensemble_data = ensemble or {}
+        timeline_vote = (ensemble_data.get("timeline") or {}).get("vote_count") or []
+        timeline_conf = (ensemble_data.get("timeline") or {}).get("confidence") or []
+        summary_vote_count = int(max(timeline_vote)) if timeline_vote else int(ensemble_data.get("vote_count") or 0)
+        confidence_order = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NORMAL": 0}
+        if timeline_conf:
+            summary_confidence = max(timeline_conf, key=lambda c: confidence_order.get(str(c), 0))
+        else:
+            summary_confidence = str(ensemble_data.get("confidence") or "NORMAL")
+
+        per_model = ensemble_data.get("per_model") or {}
+        iso_scores = (per_model.get("isolation_forest") or {}).get("score") or []
+        iso_flags = (per_model.get("isolation_forest") or {}).get("is_anomaly") or []
+        lstm_scores = (per_model.get("lstm_autoencoder") or {}).get("score") or []
+        lstm_flags = (per_model.get("lstm_autoencoder") or {}).get("is_anomaly") or []
+        cusum_scores = (per_model.get("cusum") or {}).get("score") or []
+        cusum_flags = (per_model.get("cusum") or {}).get("is_anomaly") or []
+
+        def _avg(xs):
+            return round(float(sum(xs) / max(1, len(xs))), 4) if xs else 0.0
+
+        def _flagged(fs):
+            return bool(any(fs)) if fs else False
 
         return {
             "analysis_type": "anomaly_detection",
@@ -143,6 +169,32 @@ class ResultFormatter:
                 "parameters_analyzed": len(parameter_breakdown),
                 "fallback_mode": bool((metadata or {}).get("fallback_mode", False)),
             },
+            "ensemble": {
+                "vote_count": summary_vote_count,
+                "confidence": summary_confidence,
+                "models_voted": ensemble_data.get("models_voted", []),
+                "per_model": {
+                    "isolation_forest": {
+                        "score": _avg(iso_scores),
+                        "flagged": _flagged(iso_flags),
+                        "is_trained": bool((per_model.get("isolation_forest") or {}).get("is_trained", True)),
+                    },
+                    "lstm_autoencoder": {
+                        "score": _avg(lstm_scores),
+                        "flagged": _flagged(lstm_flags),
+                        "is_trained": bool((per_model.get("lstm_autoencoder") or {}).get("is_trained", False)),
+                    },
+                    "cusum": {
+                        "score": _avg(cusum_scores),
+                        "flagged": _flagged(cusum_flags),
+                        "drift_params": (per_model.get("cusum") or {}).get("drift_params", []),
+                        "is_trained": True,
+                    },
+                },
+                "timeline": ensemble_data.get("timeline", {}),
+            },
+            "reasoning": reasoning or {},
+            "data_quality_flags": data_quality_flags or [],
         }
 
     def format_failure_prediction_results(
@@ -156,6 +208,11 @@ class ResultFormatter:
         days_available: float,
         anomaly_score: float = 0.0,
         metadata: Dict[str, Any] | None = None,
+        ensemble: Dict[str, Any] | None = None,
+        time_to_failure: Dict[str, Any] | None = None,
+        reasoning: Dict[str, Any] | None = None,
+        degradation_series: List[float] | None = None,
+        data_quality_flags: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         prob = float(max(0.0, min(100.0, failure_probability_pct)))
 
@@ -242,6 +299,11 @@ class ResultFormatter:
                 "fallback_mode": bool((metadata or {}).get("fallback_mode", False)),
                 "insufficient_trend_signal": insufficient_trend_signal,
             },
+            "ensemble": ensemble or {},
+            "time_to_failure": time_to_failure or {},
+            "reasoning": reasoning or {},
+            "degradation_series": degradation_series or [],
+            "data_quality_flags": data_quality_flags or [],
         }
 
     def format_fleet_results(

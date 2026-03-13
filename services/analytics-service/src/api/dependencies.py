@@ -8,12 +8,12 @@ from fastapi import Request
 from src.infrastructure.database import get_db_session
 from src.infrastructure.mysql_repository import MySQLResultRepository
 from src.services.result_repository import ResultRepository
-from src.workers.job_queue import JobQueue
+from src.workers.job_queue import QueueBackend
 
 logger = structlog.get_logger()
 
 
-async def get_job_queue(request: Request) -> JobQueue:
+async def get_job_queue(request: Request) -> QueueBackend:
     """Get job queue from app state."""
     return request.app.state.job_queue
 

@@ -91,6 +91,8 @@ class WeeklyRetrainer:
         try:
             from uuid import uuid4
 
+            from src.infrastructure.database import async_session_maker
+            from src.infrastructure.mysql_repository import MySQLResultRepository
             from src.models.schemas import AnalyticsRequest, AnalyticsType
 
             datasets = await self._dataset_service.list_available_datasets(device_id)
@@ -111,7 +113,24 @@ class WeeklyRetrainer:
                 dataset_key=datasets[0].get("key") if isinstance(datasets[0], dict) else None,
             )
             job_id = str(uuid4())
-            await self._job_queue.submit_job(job_id=job_id, request=request)
+            now = datetime.utcnow()
+            async with async_session_maker() as session:
+                repo = MySQLResultRepository(session)
+                await repo.create_job(
+                    job_id=job_id,
+                    device_id=device_id,
+                    analysis_type=AnalyticsType.ANOMALY.value,
+                    model_name="isolation_forest",
+                    date_range_start=now,
+                    date_range_end=now,
+                    parameters=request.parameters,
+                )
+                await repo.update_job_queue_metadata(
+                    job_id=job_id,
+                    attempt=1,
+                    queue_enqueued_at=now,
+                )
+            await self._job_queue.submit_job(job_id=job_id, request=request, attempt=1)
 
             self._status[device_id] = {
                 "status": "submitted",

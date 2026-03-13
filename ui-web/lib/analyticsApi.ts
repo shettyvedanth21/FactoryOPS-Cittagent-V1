@@ -78,6 +78,24 @@ export interface AnomalyFormattedResult {
     parameter?: string;
   }>;
   metadata: Record<string, any>;
+  ensemble?: {
+    vote_count?: number;
+    confidence?: string;
+    models_voted?: string[][];
+    per_model?: Record<string, any>;
+    timeline?: {
+      vote_count?: number[];
+      confidence?: string[];
+      models_voted?: string[][];
+    };
+  };
+  reasoning?: {
+    summary?: string;
+    affected_parameters?: string[];
+    recommended_action?: string;
+    confidence?: string;
+  };
+  data_quality_flags?: Array<Record<string, any>>;
 }
 
 export interface FailureFormattedResult {
@@ -121,6 +139,32 @@ export interface FailureFormattedResult {
     parameter?: string;
   }>;
   metadata: Record<string, any>;
+  ensemble?: {
+    verdict?: string;
+    votes?: number;
+    confidence?: string;
+    models_voted?: string[];
+    combined_probability?: number;
+    per_model?: Record<string, any>;
+  };
+  time_to_failure?: {
+    hours?: number | null;
+    label?: string;
+    confidence_interval?: [number, number] | null;
+    trend_type?: string;
+    trend_r2?: number;
+    is_reliable?: boolean;
+  };
+  reasoning?: {
+    summary?: string;
+    agreement_text?: string;
+    trend_text?: string;
+    top_risk_factors?: string[];
+    recommended_actions?: string[];
+    confidence?: string;
+  };
+  degradation_series?: number[];
+  data_quality_flags?: Array<Record<string, any>>;
 }
 
 export interface FleetFormattedResult {
@@ -146,6 +190,7 @@ export interface SupportedModelsResponse {
   anomaly_detection: string[];
   failure_prediction: string[];
   forecasting: string[];
+  ensembles?: Array<Record<string, any>>;
 }
 
 export interface AvailableDataset {

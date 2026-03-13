@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="analytics-service")
     app_env: str = Field(default="development")
     log_level: str = Field(default="INFO")
+    app_role: str = Field(default="api")
 
     api_host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
@@ -52,12 +53,27 @@ class Settings(BaseSettings):
 
     max_concurrent_jobs: int = Field(default=3)
     job_timeout_seconds: int = Field(default=3600)
+    job_lease_seconds: int = Field(default=60)
+    job_heartbeat_seconds: int = Field(default=10)
+
+    queue_backend: str = Field(default="redis")
+    redis_url: str = Field(default="redis://redis:6379/0")
+    redis_stream_name: str = Field(default="analytics_jobs_stream")
+    redis_dead_letter_stream: str = Field(default="analytics_jobs_dead_letter")
+    redis_consumer_group: str = Field(default="analytics_workers")
+    redis_consumer_name: str = Field(default="analytics-worker-1")
+    queue_max_attempts: int = Field(default=3)
+    worker_heartbeat_ttl_seconds: int = Field(default=30)
+
+    accuracy_min_labeled_events: int = Field(default=50)
+    accuracy_certification_min_precision: float = Field(default=0.70)
+    accuracy_certification_min_recall: float = Field(default=0.60)
 
     ml_analytics_v2_enabled: bool = Field(default=False)
     ml_formatted_results_enabled: bool = Field(default=True)
     ml_weekly_retrainer_enabled: bool = Field(default=True)
     ml_fleet_strict_enabled: bool = Field(default=True)
-    ml_data_readiness_gate_enabled: bool = Field(default=True)
+    ml_data_readiness_gate_enabled: bool = Field(default=False)
 
     data_export_service_url: str = Field(default="http://data-export-service:8080")
     data_readiness_poll_attempts: int = Field(default=3)

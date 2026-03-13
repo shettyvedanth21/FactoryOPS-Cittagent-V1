@@ -5,7 +5,6 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import structlog
-from prophet import Prophet
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from src.services.analytics.base import BasePipeline
@@ -103,6 +102,7 @@ class ForecastingPipeline(BasePipeline):
     ) -> Dict[str, Any]:
 
         ts_col, target_col = self._resolve_columns(train_df, params)
+        from prophet import Prophet
 
         prophet_df = pd.DataFrame(
             {

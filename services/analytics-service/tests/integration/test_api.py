@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock
 
+from src.api.dependencies import get_result_repository
 from src.main import create_app
 
 
@@ -45,7 +46,14 @@ class TestAnalyticsEndpoints:
         app = create_app()
         queue = MagicMock()
         queue.submit_job = AsyncMock()
+        queue.size = MagicMock(return_value=0)
         app.state.job_queue = queue
+        repo = MagicMock()
+        repo.create_job = AsyncMock()
+        repo.update_job_queue_metadata = AsyncMock()
+        repo.get_job = AsyncMock(return_value=None)
+        repo.list_jobs = AsyncMock(return_value=[])
+        app.dependency_overrides[get_result_repository] = lambda: repo
         return TestClient(app)
     
     def test_submit_analytics_job(self, client):
@@ -80,8 +88,9 @@ class TestAnalyticsEndpoints:
         
         # Check specific models
         assert "isolation_forest" in data["anomaly_detection"]
-        assert "random_forest" in data["failure_prediction"]
+        assert "xgboost" in data["failure_prediction"]
         assert "prophet" in data["forecasting"]
+        assert "ensembles" in data
     
     def test_invalid_model_for_analysis_type(self, client):
         """Test validation of model for analysis type."""

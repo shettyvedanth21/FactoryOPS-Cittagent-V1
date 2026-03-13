@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from src.api.routes import analytics, health
 from src.config.logging_config import configure_logging
 from src.config.settings import Settings, get_settings
-from src.workers.job_queue import JobQueue
+from src.workers.job_queue import InMemoryJobQueue, RedisJobQueue
 from src.workers.job_worker import JobWorker
 
 logger = structlog.get_logger()
@@ -25,17 +25,32 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.log_level)
     logger.info("analytics_service_starting", version="1.0.0")
     
-    job_queue = JobQueue()
-    job_worker = JobWorker(job_queue)
-    
-    worker_task = asyncio.create_task(job_worker.start())
+    if settings.queue_backend == "redis":
+        job_queue = RedisJobQueue(
+            redis_url=settings.redis_url,
+            stream_name=settings.redis_stream_name,
+            dead_letter_stream=settings.redis_dead_letter_stream,
+            consumer_group=settings.redis_consumer_group,
+            consumer_name=settings.redis_consumer_name,
+        )
+    else:
+        job_queue = InMemoryJobQueue()
+
+    job_worker = None
+    worker_task = None
     app.state.job_queue = job_queue
-    app.state.job_worker = job_worker
     app.state.fleet_tasks = set()
+    app.state.pending_jobs = {}
+    app.state.queue_backend = settings.queue_backend
+
+    if settings.app_role == "worker":
+        job_worker = JobWorker(job_queue, max_concurrent=settings.max_concurrent_jobs)
+        app.state.job_worker = job_worker
+        worker_task = asyncio.create_task(job_worker.start())
 
     _retrainer = None
     _retrainer_task = None
-    if settings.ml_weekly_retrainer_enabled:
+    if settings.ml_weekly_retrainer_enabled and settings.app_role == "worker":
         from src.infrastructure.s3_client import S3Client
         from src.services.analytics.retrainer import WeeklyRetrainer
         from src.services.dataset_service import DatasetService
@@ -52,16 +67,18 @@ async def lifespan(app: FastAPI):
     yield
     
     logger.info("analytics_service_shutting_down")
-    await job_worker.stop()
+    if job_worker is not None:
+        await job_worker.stop()
     for task in list(app.state.fleet_tasks):
         task.cancel()
     if app.state.fleet_tasks:
         await asyncio.gather(*app.state.fleet_tasks, return_exceptions=True)
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    if worker_task is not None:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
     if settings.ml_weekly_retrainer_enabled and hasattr(app.state, "retrainer") and _retrainer:
         await _retrainer.stop()

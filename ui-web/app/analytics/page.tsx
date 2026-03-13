@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { Area, AreaChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { getDevices, Device } from "@/lib/deviceApi";
 import {
   runAnalytics,
@@ -66,6 +67,67 @@ function badgeColor(level: string): string {
   if (level === "High") return "#22c55e";
   if (level === "Moderate") return "#f59e0b";
   return "#ef4444";
+}
+
+function ModelVotingPanel({ ensemble }: { ensemble: any }) {
+  if (!ensemble?.per_model) return null;
+  return (
+    <div style={panelStyle()}>
+      <h3 style={titleStyle()}>Model Confirmation</h3>
+      <div style={{ display: "grid", gap: 6 }}>
+        {Object.entries(ensemble.per_model).map(([name, m]: [string, any]) => {
+          const flagged = Boolean(m?.voted_high ?? m?.flagged);
+          const value = m?.probability_pct != null
+            ? `${m.probability_pct}% probability`
+            : m?.score != null
+              ? `Score: ${(Number(m.score) * 100).toFixed(0)}`
+              : (m?.trend_type ?? "—");
+          return (
+            <div key={name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 11 }}>
+              <span style={{ fontFamily: "monospace", fontSize: 10 }}>{name}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span>{value}</span>
+                <span style={{ padding: "2px 6px", borderRadius: 999, fontSize: 10, background: flagged ? "#fee2e2" : "#dcfce7", color: flagged ? "#b91c1c" : "#15803d" }}>
+                  {flagged ? "HIGH RISK" : "Normal"}
+                </span>
+                {m?.is_trained === false && (
+                  <span style={{ color: COLORS.muted, fontSize: 10 }}>(not trained)</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #e2e8f0", fontSize: 11, fontWeight: 600 }}>
+        Verdict: {ensemble.verdict ?? ensemble.confidence ?? "N/A"} · {(ensemble.votes ?? ensemble.vote_count ?? 0)}/3 models agree
+      </div>
+    </div>
+  );
+}
+
+function DataQualityBanner({ flags }: { flags?: Array<Record<string, any>> }) {
+  if (!flags?.length) return null;
+  return (
+    <>
+      {flags.map((flag, i) => {
+        if (flag.type !== "data_confidence") return null;
+        const color = flag.color as string | undefined;
+        const style =
+          color === "red"
+            ? { background: "#fef2f2", color: "#b91c1c" }
+            : color === "orange"
+              ? { background: "#fff7ed", color: "#c2410c" }
+              : color === "yellow"
+                ? { background: "#fefce8", color: "#a16207" }
+                : { background: "#eff6ff", color: "#1d4ed8" };
+        return (
+          <div key={`dq-${i}`} style={{ ...style, borderRadius: 8, padding: 8, fontSize: 11 }}>
+            ℹ Confidence: {String(flag.confidence_level ?? "Unknown")} — {String(flag.message ?? "")}
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
 function StepDots({ step }: { step: number }) {
@@ -433,6 +495,7 @@ function AnalyticsPageContent() {
               {confidence.banner_text}
             </div>
           )}
+          <DataQualityBanner flags={result.data_quality_flags} />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8 }}>
             <Stat label="Total Anomalies" value={String(result.summary.total_anomalies)} />
             <Stat label="Anomaly Rate" value={`${result.summary.anomaly_rate_pct}%`} />
@@ -533,6 +596,23 @@ function AnalyticsPageContent() {
               </div>
             </div>
           </div>
+
+          <ModelVotingPanel ensemble={result.ensemble} />
+
+          {result.reasoning && (
+            <div style={{ ...panelStyle(), background: "#f8fafc" }}>
+              <h3 style={titleStyle()}>Why is this flagged?</h3>
+              <div style={{ fontSize: 11, fontWeight: 600 }}>{result.reasoning.summary ?? "No summary available."}</div>
+              {result.reasoning.affected_parameters?.length ? (
+                <div style={{ marginTop: 6, fontSize: 11, color: COLORS.muted }}>
+                  Affected parameters: {result.reasoning.affected_parameters.join(", ")}
+                </div>
+              ) : null}
+              {result.reasoning.recommended_action ? (
+                <div style={{ marginTop: 6, fontSize: 11 }}>→ {result.reasoning.recommended_action}</div>
+              ) : null}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -556,6 +636,7 @@ function AnalyticsPageContent() {
               {confidence.banner_text}
             </div>
           )}
+          <DataQualityBanner flags={result.data_quality_flags} />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 8 }}>
             <Stat label="Risk Level" value={result.summary.failure_risk} />
             <Stat label="Failure Probability" value={`${result.summary.failure_probability_pct.toFixed(1)}%`} />
@@ -650,6 +731,76 @@ function AnalyticsPageContent() {
               </div>
             </div>
           </div>
+
+          <ModelVotingPanel ensemble={result.ensemble} />
+
+          {result.time_to_failure && (
+            <div style={panelStyle()}>
+              <h3 style={titleStyle()}>Failure Forecast</h3>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{result.time_to_failure.label ?? "No trend forecast"}</div>
+              {result.time_to_failure.confidence_interval ? (
+                <div style={{ marginTop: 4, color: COLORS.muted, fontSize: 11 }}>
+                  Range: {result.time_to_failure.confidence_interval[0]}–{result.time_to_failure.confidence_interval[1]} hours
+                </div>
+              ) : null}
+              <div style={{ marginTop: 4, color: COLORS.muted, fontSize: 10 }}>
+                Trend: {result.time_to_failure.trend_type ?? "unknown"}
+                {result.time_to_failure.trend_r2 != null ? ` (R²=${result.time_to_failure.trend_r2.toFixed(2)})` : ""}
+                {" · "}
+                {result.time_to_failure.is_reliable ? "Reliable" : "Low reliability"}
+              </div>
+            </div>
+          )}
+
+          {result.reasoning && (
+            <div style={{ ...panelStyle(), background: "#f8fafc" }}>
+              <h3 style={titleStyle()}>Why is this flagged?</h3>
+              <div style={{ fontSize: 11, fontWeight: 600 }}>{result.reasoning.summary ?? "No summary available."}</div>
+              {result.reasoning.agreement_text ? (
+                <div style={{ marginTop: 4, color: COLORS.muted, fontSize: 11 }}>{result.reasoning.agreement_text}</div>
+              ) : null}
+              {result.reasoning.top_risk_factors?.length ? (
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ fontSize: 10, color: COLORS.muted, textTransform: "uppercase", letterSpacing: 1 }}>Top contributing factors</div>
+                  <ol style={{ margin: "4px 0 0", paddingLeft: 16, fontSize: 11 }}>
+                    {result.reasoning.top_risk_factors.map((f, i) => (
+                      <li key={`rf-${i}`}>{f}</li>
+                    ))}
+                  </ol>
+                </div>
+              ) : null}
+              {result.reasoning.recommended_actions?.length ? (
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ fontSize: 10, color: COLORS.muted, textTransform: "uppercase", letterSpacing: 1 }}>Recommended actions</div>
+                  <div style={{ marginTop: 4, display: "grid", gap: 2, fontSize: 11 }}>
+                    {result.reasoning.recommended_actions.map((a, i) => (
+                      <div key={`ra-${i}`}>→ {a}</div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {result.degradation_series?.length ? (
+            <div style={panelStyle()}>
+              <h3 style={titleStyle()}>Degradation Trend</h3>
+              <ResponsiveContainer width="100%" height={200}>
+                <AreaChart data={result.degradation_series.map((v, i) => ({ t: i, score: v }))}>
+                  <XAxis dataKey="t" hide />
+                  <YAxis domain={[0, 1]} />
+                  <Tooltip />
+                  <ReferenceLine
+                    y={0.85}
+                    stroke="red"
+                    strokeDasharray="4 2"
+                    label={{ value: "Failure threshold", position: "right", fontSize: 11, fill: "red" }}
+                  />
+                  <Area type="monotone" dataKey="score" stroke="#f97316" fill="#fed7aa" strokeWidth={2} dot={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ) : null}
         </div>
       </div>
     );

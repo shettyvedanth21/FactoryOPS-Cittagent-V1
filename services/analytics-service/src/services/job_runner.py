@@ -263,11 +263,14 @@ from typing import Any, Dict
 
 import pandas as pd
 import structlog
+from sqlalchemy import select
 
 from src.config.settings import get_settings
+from src.infrastructure.database import async_session_maker
+from src.models.database import AccuracyEvaluation
 from src.models.schemas import AnalyticsRequest, AnalyticsType, JobStatus
-from src.services.analytics.anomaly_detection import AnomalyDetectionPipeline
-from src.services.analytics.failure_prediction import FailurePredictionPipeline
+from src.services.analytics.ensemble.anomaly_ensemble import AnomalyEnsemble
+from src.services.analytics.ensemble.failure_ensemble import FailureEnsemble
 from src.services.analytics.forecasting import ForecastingPipeline
 from src.services.dataset_service import DatasetService
 from src.services.result_formatter import ResultFormatter
@@ -281,6 +284,13 @@ logger = structlog.get_logger()
 # Permanent JSON safety boundary
 # ----------------------------------------------------------------------
 def _json_safe(obj: Any):
+    # Handle numpy-like arrays without importing numpy in hot path.
+    if hasattr(obj, "tolist") and not isinstance(obj, (str, bytes, bytearray)):
+        try:
+            return _json_safe(obj.tolist())
+        except Exception:
+            pass
+
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return None
@@ -308,8 +318,6 @@ class JobRunner:
         self._logger = logger.bind(service="JobRunner")
 
         self._pipelines = {
-            AnalyticsType.ANOMALY: AnomalyDetectionPipeline(),
-            AnalyticsType.PREDICTION: FailurePredictionPipeline(),
             AnalyticsType.FORECAST: ForecastingPipeline(),
         }
 
@@ -346,46 +354,113 @@ class JobRunner:
                 s3_key=getattr(request, "dataset_key", None),
             )
 
-            pipeline = self._pipelines.get(request.analysis_type)
-            if not pipeline:
-                raise AnalyticsError(
-                    f"Unknown analysis type: {request.analysis_type}"
-                )
-
             await self._result_repo.update_job_progress(
                 job_id, 30.0, "Preparing features"
             )
+            if request.analysis_type == AnalyticsType.ANOMALY:
+                await self._result_repo.update_job_progress(
+                    job_id, 50.0, "Training ensemble models"
+                )
+                ensemble = AnomalyEnsemble()
+                await self._result_repo.update_job_progress(
+                    job_id, 75.0, "Running ensemble inference"
+                )
+                results = ensemble.run(df, params)
+                await self._result_repo.update_job_progress(
+                    job_id, 90.0, "Calculating metrics"
+                )
+                total = len(results.get("is_anomaly", []))
+                detected = int(sum(1 for x in results.get("is_anomaly", []) if x))
+                scores = pd.Series(results.get("anomaly_score", []), dtype=float)
+                metrics = {
+                    "total_points": float(total),
+                    "anomalies_detected": float(detected),
+                    "anomaly_rate_pct": float((detected / total * 100) if total else 0.0),
+                    "mean_anomaly_score": float(scores.mean()) if len(scores) else 0.0,
+                    "max_anomaly_score": float(scores.max()) if len(scores) else 0.0,
+                }
+            elif request.analysis_type == AnalyticsType.PREDICTION:
+                await self._result_repo.update_job_progress(
+                    job_id, 50.0, "Training ensemble models"
+                )
+                preloaded_artifacts: Dict[str, Any] = {}
+                try:
+                    xgb_art = await self._result_repo.get_model_artifact(
+                        device_id=request.device_id,
+                        analysis_type=request.analysis_type.value,
+                        model_key="xgboost",
+                    )
+                    if xgb_art:
+                        preloaded_artifacts["xgboost"] = xgb_art
+                except Exception:
+                    preloaded_artifacts = {}
+                ensemble = FailureEnsemble()
+                await self._result_repo.update_job_progress(
+                    job_id, 75.0, "Running ensemble inference"
+                )
+                run_params = dict(params)
+                run_params["__artifacts"] = preloaded_artifacts
+                results = ensemble.run(df, run_params)
+                artifact_updates = results.pop("artifact_updates", {}) if isinstance(results, dict) else {}
+                try:
+                    xgb_update = (artifact_updates or {}).get("xgboost", {})
+                    xgb_payload = xgb_update.get("artifact_payload")
+                    xgb_schema = xgb_update.get("feature_schema_hash")
+                    if xgb_payload and xgb_schema:
+                        await self._result_repo.upsert_model_artifact(
+                            device_id=request.device_id,
+                            analysis_type=request.analysis_type.value,
+                            model_key="xgboost",
+                            feature_schema_hash=str(xgb_schema),
+                            artifact_payload=xgb_payload,
+                            metrics=xgb_update.get("metrics", {}),
+                        )
+                except Exception:
+                    pass
+                await self._result_repo.update_job_progress(
+                    job_id, 90.0, "Calculating metrics"
+                )
+                metrics = {
+                    "failure_probability_pct": float(results.get("failure_probability_pct", 0.0)),
+                    "model_confidence": str(results.get("model_confidence", "Low")),
+                }
+                cert_flag = await self._latest_accuracy_flag(request.device_id)
+                if cert_flag:
+                    results.setdefault("data_quality_flags", []).append(cert_flag)
+            else:
+                pipeline = self._pipelines.get(request.analysis_type)
+                if not pipeline:
+                    raise AnalyticsError(
+                        f"Unknown analysis type: {request.analysis_type}"
+                    )
 
-            train_df, test_df = pipeline.prepare_data(
-                df, params
-            )
+                train_df, test_df = pipeline.prepare_data(
+                    df, params
+                )
 
-            await self._result_repo.update_job_progress(
-                job_id, 50.0, "Training model"
-            )
+                await self._result_repo.update_job_progress(
+                    job_id, 50.0, "Training model"
+                )
 
-            model = pipeline.train(
-                train_df, request.model_name, params
-            )
+                model = pipeline.train(
+                    train_df, request.model_name, params
+                )
 
-            await self._result_repo.update_job_progress(
-                job_id, 75.0, "Running inference"
-            )
+                await self._result_repo.update_job_progress(
+                    job_id, 75.0, "Running inference"
+                )
 
-            # -------------------------------------------------------
-            # Inference always runs on FULL dataframe
-            # -------------------------------------------------------
-            results = pipeline.predict(
-                df, model, params
-            )
+                results = pipeline.predict(
+                    df, model, params
+                )
 
-            await self._result_repo.update_job_progress(
-                job_id, 90.0, "Calculating metrics"
-            )
+                await self._result_repo.update_job_progress(
+                    job_id, 90.0, "Calculating metrics"
+                )
 
-            metrics = pipeline.evaluate(
-                test_df, results, params
-            )
+                metrics = pipeline.evaluate(
+                    test_df, results, params
+                )
 
             # ---------------------------------------------------------
             # Attach timestamp aligned points
@@ -412,6 +487,9 @@ class JobRunner:
                             "days_available": results.get("days_available", params.get("lookback_days", 7)),
                             "data_points_analyzed": len(results.get("is_anomaly", [])),
                         },
+                        ensemble=results.get("ensemble"),
+                        reasoning=results.get("reasoning"),
+                        data_quality_flags=results.get("data_quality_flags"),
                     )
                 elif request.analysis_type == AnalyticsType.PREDICTION:
                     results["formatted"] = formatter.format_failure_prediction_results(
@@ -429,6 +507,11 @@ class JobRunner:
                             "data_points_analyzed": len(results.get("failure_probability", [])),
                             "sensitivity": params.get("sensitivity", "medium"),
                         },
+                        ensemble=results.get("ensemble"),
+                        time_to_failure=results.get("time_to_failure"),
+                        reasoning=results.get("reasoning"),
+                        degradation_series=results.get("degradation_series"),
+                        data_quality_flags=results.get("data_quality_flags"),
                     )
 
             # ---------------------------------------------------------
@@ -483,6 +566,43 @@ class JobRunner:
             )
 
             raise AnalyticsError(f"Job execution failed: {e}") from e
+
+    async def _latest_accuracy_flag(self, device_id: str) -> Dict[str, Any] | None:
+        async with async_session_maker() as session:
+            q = (
+                select(AccuracyEvaluation)
+                .where(AccuracyEvaluation.analysis_type == AnalyticsType.PREDICTION.value)
+                .order_by(AccuracyEvaluation.created_at.desc())
+                .limit(5)
+            )
+            rows = list((await session.execute(q)).scalars().all())
+
+        if not rows:
+            return {
+                "type": "accuracy_certification",
+                "is_certified": False,
+                "severity": "info",
+                "message": "Accuracy not certified yet — ingest labeled events and run /accuracy/evaluate.",
+            }
+
+        picked = None
+        for row in rows:
+            if row.scope_device_id == device_id:
+                picked = row
+                break
+        if picked is None:
+            picked = rows[0]
+
+        return {
+            "type": "accuracy_certification",
+            "is_certified": bool(picked.is_certified),
+            "severity": "info" if bool(picked.is_certified) else "warning",
+            "message": (
+                "Certified against labeled events."
+                if bool(picked.is_certified)
+                else f"Not certified yet — precision={picked.precision}, recall={picked.recall}, labels={picked.labeled_events}."
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Anomaly points
@@ -615,12 +735,18 @@ class JobRunner:
             predicted,
             ttf,
         ):
+            ttf_val = None
+            if h is not None:
+                try:
+                    ttf_val = float(h)
+                except Exception:
+                    ttf_val = None
             points.append(
                 {
                     "timestamp": ts.isoformat(),
                     "failure_probability": float(p),
                     "predicted_failure": bool(f),
-                    "time_to_failure_hours": float(h),
+                    "time_to_failure_hours": ttf_val,
                 }
             )
 

@@ -1,19 +1,21 @@
 """Analytics API endpoints."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from uuid import uuid4
 
 import aiohttp
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select
 
 from src.api.dependencies import get_job_queue, get_result_repository
 from src.config.settings import get_settings
 from src.infrastructure.database import async_session_maker
 from src.infrastructure.mysql_repository import MySQLResultRepository
 from src.infrastructure.s3_client import S3Client
+from src.models.database import WorkerHeartbeat, FailureEventLabel, AccuracyEvaluation
 from src.models.schemas import (
     AnalyticsJobResponse,
     AnalyticsRequest,
@@ -27,9 +29,10 @@ from src.models.schemas import (
 from src.services.result_formatter import ResultFormatter
 from src.services.result_repository import ResultRepository
 from src.utils.exceptions import JobNotFoundError
-from src.workers.job_queue import JobQueue
+from src.workers.job_queue import QueueBackend
 
 from src.services.dataset_service import DatasetService
+from src.services.analytics.accuracy_evaluator import AccuracyEvaluator
 
 logger = structlog.get_logger()
 
@@ -44,7 +47,8 @@ router = APIRouter()
 async def run_analytics(
     request: AnalyticsRequest,
     app_request: Request,
-    job_queue: JobQueue = Depends(get_job_queue),
+    job_queue: QueueBackend = Depends(get_job_queue),
+    result_repository: ResultRepository = Depends(get_result_repository),
 ) -> AnalyticsJobResponse:
     """
     Submit a new analytics job.
@@ -75,35 +79,59 @@ async def run_analytics(
             end_time=request.end_time,
         )
         if not dataset_key:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={
-                    "error": "DATASET_NOT_READY",
-                    "code": "DATASET_NOT_READY",
-                    "message": (
-                        "No dataset available for the selected date range after export readiness checks. "
-                        "Ensure telemetry exists in that range and retry."
-                    ),
-                    "device_id": request.device_id,
-                    "start_time": request.start_time.isoformat(),
-                    "end_time": request.end_time.isoformat(),
-                    "data_readiness_gate_enabled": settings.ml_data_readiness_gate_enabled,
-                },
+            if settings.ml_data_readiness_gate_enabled:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "error": "DATASET_NOT_READY",
+                        "code": "DATASET_NOT_READY",
+                        "message": (
+                            "No dataset available for the selected date range after export readiness checks. "
+                            "Ensure telemetry exists in that range and retry."
+                        ),
+                        "device_id": request.device_id,
+                        "start_time": request.start_time.isoformat(),
+                        "end_time": request.end_time.isoformat(),
+                        "data_readiness_gate_enabled": settings.ml_data_readiness_gate_enabled,
+                    },
+                )
+            logger.warning(
+                "data_readiness_soft_fail",
+                device_id=request.device_id,
+                start_time=request.start_time.isoformat(),
+                end_time=request.end_time.isoformat(),
+                message="Proceeding without resolved dataset_key because readiness gate is disabled.",
             )
-        resolved_request = request.model_copy(update={"dataset_key": dataset_key})
-        logger.info(
-            "single_analytics_dataset_resolved",
-            job_id=job_id,
-            device_id=request.device_id,
-            dataset_key=dataset_key,
-            start_time=request.start_time.isoformat(),
-            end_time=request.end_time.isoformat(),
-        )
+        else:
+            resolved_request = request.model_copy(update={"dataset_key": dataset_key})
+            logger.info(
+                "single_analytics_dataset_resolved",
+                job_id=job_id,
+                device_id=request.device_id,
+                dataset_key=dataset_key,
+                start_time=request.start_time.isoformat(),
+                end_time=request.end_time.isoformat(),
+            )
 
-    await job_queue.submit_job(
+    start_time = resolved_request.start_time or datetime.now(timezone.utc)
+    end_time = resolved_request.end_time or start_time
+    await result_repository.create_job(
         job_id=job_id,
-        request=resolved_request,
+        device_id=resolved_request.device_id,
+        analysis_type=resolved_request.analysis_type.value,
+        model_name=resolved_request.model_name,
+        date_range_start=start_time,
+        date_range_end=end_time,
+        parameters=resolved_request.parameters,
     )
+    await result_repository.update_job_queue_metadata(
+        job_id=job_id,
+        attempt=1,
+        queue_enqueued_at=datetime.now(timezone.utc),
+        queue_position=max(0, int(getattr(job_queue, "size", lambda: 0)() or 0)),
+    )
+
+    await job_queue.submit_job(job_id=job_id, request=resolved_request, attempt=1)
     if not hasattr(app_request.app.state, "pending_jobs"):
         app_request.app.state.pending_jobs = {}
     app_request.app.state.pending_jobs[job_id] = {
@@ -120,8 +148,8 @@ async def run_analytics(
 
 def _default_model_for(analysis_type: str) -> str:
     if analysis_type == AnalyticsType.ANOMALY.value:
-        return "isolation_forest"
-    return "random_forest"
+        return "anomaly_ensemble"
+    return "failure_ensemble"
 
 
 async def _fetch_all_device_ids() -> List[str]:
@@ -537,7 +565,12 @@ async def _run_fleet_job(parent_job_id: str, req: FleetAnalyticsRequest, app) ->
                     date_range_end=req.end_time,
                     parameters=req.parameters or {},
                 )
-            await app.state.job_queue.submit_job(job_id=child_id, request=child_request)
+                await repo.update_job_queue_metadata(
+                    job_id=child_id,
+                    attempt=1,
+                    queue_enqueued_at=datetime.now(timezone.utc),
+                )
+            await app.state.job_queue.submit_job(job_id=child_id, request=child_request, attempt=1)
             child_jobs[device_id] = child_id
 
         if not child_jobs:
@@ -631,6 +664,10 @@ async def get_job_status(
             created_at=job.created_at,
             started_at=job.started_at,
             completed_at=job.completed_at,
+            queue_position=job.queue_position,
+            attempt=job.attempt,
+            worker_lease_expires_at=job.worker_lease_expires_at,
+            estimated_wait_seconds=max(0, int((job.queue_position or 0) * 5)),
         )
     except JobNotFoundError:
         pending_jobs = getattr(app_request.app.state, "pending_jobs", {})
@@ -713,13 +750,53 @@ async def get_supported_models() -> SupportedModelsResponse:
     return SupportedModelsResponse(
         anomaly_detection=[
             "isolation_forest",
-            "autoencoder",
+            "lstm_autoencoder",
+            "cusum",
         ],
         failure_prediction=[
-            "random_forest",
-            "gradient_boosting",
+            "xgboost",
+            "lstm_classifier",
+            "degradation_tracker",
         ],
         forecasting=forecasting_models,
+        ensembles=[
+            {
+                "id": "anomaly_ensemble",
+                "display_name": "Anomaly Detection — 3 Model Ensemble",
+                "models": [
+                    {"name": "isolation_forest", "trains": True},
+                    {
+                        "name": "lstm_autoencoder",
+                        "trains": True,
+                        "min_data": "50 sequences (~80 min)",
+                    },
+                    {
+                        "name": "cusum",
+                        "trains": False,
+                        "note": "Works from minute 1",
+                    },
+                ],
+                "voting_rule": "Alert when 2 of 3 models flag",
+            },
+            {
+                "id": "failure_ensemble",
+                "display_name": "Failure Prediction — 3 Model Ensemble",
+                "models": [
+                    {"name": "xgboost", "trains": True},
+                    {
+                        "name": "lstm_classifier",
+                        "trains": True,
+                        "min_data": "50 sequences (~80 min)",
+                    },
+                    {
+                        "name": "degradation_tracker",
+                        "trains": False,
+                        "note": "Physics-based — no training needed",
+                    },
+                ],
+                "voting_rule": "CRITICAL=3/3, WARNING=2/3, WATCH=1/3",
+            },
+        ],
     )
 
 
@@ -751,9 +828,126 @@ async def list_jobs(
             created_at=job.created_at,
             started_at=job.started_at,
             completed_at=job.completed_at,
+            queue_position=job.queue_position,
+            attempt=job.attempt,
+            worker_lease_expires_at=job.worker_lease_expires_at,
+            estimated_wait_seconds=max(0, int((job.queue_position or 0) * 5)),
         )
         for job in jobs
     ]
+
+
+@router.get("/ops/queue")
+async def get_queue_ops_snapshot(
+    app_request: Request,
+    result_repo: ResultRepository = Depends(get_result_repository),
+) -> Dict[str, object]:
+    """Operational queue snapshot for SRE dashboards."""
+    pending = await result_repo.list_jobs(status=JobStatus.PENDING.value, limit=5000, offset=0)
+    running = await result_repo.list_jobs(status=JobStatus.RUNNING.value, limit=5000, offset=0)
+    failed = await result_repo.list_jobs(status=JobStatus.FAILED.value, limit=5000, offset=0)
+    settings = get_settings()
+    active_workers = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(10, settings.worker_heartbeat_ttl_seconds))
+    async with async_session_maker() as session:
+        rows = await session.execute(select(WorkerHeartbeat).where(WorkerHeartbeat.last_heartbeat_at >= cutoff))
+        active_workers = len(list(rows.scalars().all()))
+
+    return {
+        "queue_depth": len(pending),
+        "consumer_lag_estimate": len(pending),
+        "failed_job_count": len(failed),
+        "active_workers": active_workers,
+        "running_jobs": len(running),
+        "queue_backend": getattr(app_request.app.state, "queue_backend", "unknown"),
+    }
+
+
+@router.post("/labels/failure-events")
+async def ingest_failure_event_label(payload: Dict[str, object]) -> Dict[str, object]:
+    """Add a maintenance/failure ground-truth label event."""
+    device_id = str(payload.get("device_id") or "").strip()
+    event_time_raw = payload.get("event_time")
+    if not device_id or not event_time_raw:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="device_id and event_time are required",
+        )
+    try:
+        event_time = datetime.fromisoformat(str(event_time_raw).replace("Z", "+00:00"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"invalid event_time: {exc}",
+        )
+
+    row = FailureEventLabel(
+        device_id=device_id,
+        event_time=event_time,
+        event_type=str(payload.get("event_type") or "failure"),
+        severity=str(payload.get("severity") or "") or None,
+        source=str(payload.get("source") or "") or "manual",
+        metadata_json=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+    )
+    async with async_session_maker() as session:
+        session.add(row)
+        await session.commit()
+
+    return {"status": "accepted", "id": row.id}
+
+
+@router.post("/accuracy/evaluate")
+async def evaluate_accuracy(
+    device_id: Optional[str] = Query(default=None),
+    lookback_days: int = Query(default=90, ge=1, le=3650),
+    lead_window_hours: int = Query(default=24, ge=1, le=720),
+) -> Dict[str, object]:
+    """Run backtest evaluation against labeled events and persist summary."""
+    async with async_session_maker() as session:
+        result = await AccuracyEvaluator.evaluate_failure_predictions(
+            session=session,
+            device_id=device_id,
+            lookback_days=lookback_days,
+            lead_window_hours=lead_window_hours,
+        )
+    return {
+        "analysis_type": "prediction",
+        "scope_device_id": device_id,
+        **result.as_dict(),
+    }
+
+
+@router.get("/accuracy/latest")
+async def get_latest_accuracy(device_id: Optional[str] = Query(default=None)) -> Dict[str, object]:
+    """Fetch latest persisted accuracy evaluation record."""
+    async with async_session_maker() as session:
+        q = (
+            select(AccuracyEvaluation)
+            .where(AccuracyEvaluation.analysis_type == "prediction")
+            .order_by(AccuracyEvaluation.created_at.desc())
+            .limit(1)
+        )
+        if device_id:
+            q = q.where(AccuracyEvaluation.scope_device_id == device_id)
+        row = (await session.execute(q)).scalar_one_or_none()
+
+    if not row:
+        return {"analysis_type": "prediction", "scope_device_id": device_id, "status": "no_evaluation"}
+
+    return {
+        "analysis_type": row.analysis_type,
+        "scope_device_id": row.scope_device_id,
+        "sample_size": row.sample_size,
+        "labeled_events": row.labeled_events,
+        "precision": row.precision,
+        "recall": row.recall,
+        "f1_score": row.f1_score,
+        "false_alert_rate": row.false_alert_rate,
+        "avg_lead_hours": row.avg_lead_hours,
+        "is_certified": bool(row.is_certified),
+        "notes": row.notes,
+        "created_at": row.created_at,
+    }
 
 
 # ------------------------------------------------------------------

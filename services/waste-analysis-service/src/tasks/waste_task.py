@@ -134,6 +134,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             quality_failures: list[dict] = []
             threshold_by_device: dict[str, float | None] = {}
             shifts_by_device: dict[str, list[dict]] = {}
+            missing_threshold_ids: list[str] = []
             for d in devices:
                 device_id = d.get("device_id")
                 if not device_id:
@@ -142,6 +143,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                 threshold_by_device[device_id] = threshold
                 shifts_by_device[device_id] = await device_client.get_shift_config(device_id)
                 if threshold is None:
+                    missing_threshold_ids.append(device_id)
                     quality_failures.append(
                         {
                             "device_id": device_id,
@@ -151,7 +153,57 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                         }
                     )
 
-            if settings.WASTE_STRICT_QUALITY_GATE and quality_failures:
+            # Permanent fix:
+            # - Selected scope stays strict (explicit user intent).
+            # - All scope skips unconfigured devices and proceeds with valid subset.
+            skipped_devices: list[dict] = []
+            if settings.WASTE_STRICT_QUALITY_GATE and quality_failures and scope == "all":
+                filtered_devices: list[dict] = []
+                for d in devices:
+                    device_id = d.get("device_id")
+                    if device_id in missing_threshold_ids:
+                        skipped_devices.append(
+                            {
+                                "device_id": device_id,
+                                "reason": "IDLE_THRESHOLD_NOT_CONFIGURED",
+                            }
+                        )
+                    else:
+                        filtered_devices.append(d)
+                devices = filtered_devices
+
+                if not devices:
+                    await repo.update_job(
+                        job_id,
+                        status="failed",
+                        error_code="QUALITY_GATE_FAILED",
+                        progress_pct=100,
+                        stage="Quality gate failed",
+                        error_message="Quality gate failed: configure idle threshold for all selected devices",
+                        result_json={
+                            "job_id": job_id,
+                            "scope": scope,
+                            "start_date": start_date.isoformat(),
+                            "end_date": end_date.isoformat(),
+                            "granularity": granularity,
+                            "quality_gate_passed": False,
+                            "quality_failures": quality_failures,
+                            "skipped_devices": skipped_devices,
+                            "estimation_used": False,
+                            "device_summaries": [],
+                            "warnings": [f"{f['device_id']}: {f['message']}" for f in quality_failures],
+                        },
+                        completed_at=datetime.utcnow(),
+                    )
+                    return
+                # Missing-threshold devices were intentionally skipped in "all" scope.
+                # Keep quality gate failures for analyzed devices only.
+                quality_failures = [
+                    f for f in quality_failures if f.get("code") != "IDLE_THRESHOLD_NOT_CONFIGURED"
+                ]
+
+            if settings.WASTE_STRICT_QUALITY_GATE and quality_failures and scope != "all":
+                missing_list = ", ".join(sorted(missing_threshold_ids)) if missing_threshold_ids else "selected devices"
                 payload = {
                     "job_id": job_id,
                     "scope": scope,
@@ -160,6 +212,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                     "granularity": granularity,
                     "quality_gate_passed": False,
                     "quality_failures": quality_failures,
+                    "skipped_devices": skipped_devices,
                     "estimation_used": False,
                     "device_summaries": [],
                     "warnings": [f"{f['device_id']}: {f['message']}" for f in quality_failures],
@@ -170,7 +223,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                     error_code="QUALITY_GATE_FAILED",
                     progress_pct=100,
                     stage="Quality gate failed",
-                    error_message="Quality gate failed: configure idle threshold for all selected devices",
+                    error_message=f"Quality gate failed: configure idle threshold for {missing_list}",
                     result_json=payload,
                     completed_at=datetime.utcnow(),
                 )
@@ -296,8 +349,13 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                 "insights": insights,
                 "quality_gate_passed": quality_gate_passed,
                 "quality_failures": quality_failures,
+                "skipped_devices": skipped_devices,
                 "estimation_used": False,
             }
+            if skipped_devices:
+                result_payload["warnings"].append(
+                    f"Skipped {len(skipped_devices)} device(s) without idle threshold in all-devices scope"
+                )
 
             try:
                 ref_kwh = await _find_reporting_reference_kwh(scope, selected, start_date, end_date)

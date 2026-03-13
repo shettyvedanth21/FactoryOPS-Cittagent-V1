@@ -49,21 +49,10 @@ class FailurePredictionPipeline(BasePipeline):
 
         features = self._build_features(data, cols)
 
-        # Non-circular stress labels
-        band_viol = pd.DataFrame(index=data.index)
-        for col in cols:
-            p10, p90 = data[col].quantile(0.10), data[col].quantile(0.90)
-            band_viol[col] = ((data[col] < p10) | (data[col] > p90)).astype(int)
-        multi = (band_viol.sum(axis=1) >= 2).astype(int)
-
-        roc_stress = pd.Series(0, index=data.index)
-        for col in cols:
-            roc = data[col].diff().abs().fillna(0)
-            roc_stress = roc_stress | (roc > roc.quantile(0.95)).astype(int)
-
-        labels = ((multi | roc_stress) > 0).astype(int)
-        if labels.sum() < 5:
-            labels.iloc[-min(10, len(labels)) :] = 1
+        labels = self._generate_labels(
+            train_df[["timestamp"] + cols].copy(),
+            cols,
+        )
 
         scaler = StandardScaler()
         X = scaler.fit_transform(features.fillna(0))
@@ -86,6 +75,38 @@ class FailurePredictionPipeline(BasePipeline):
             "train_data": data,
             "confidence": confidence.to_dict(),
         }
+
+    def _generate_labels(
+        self,
+        df: pd.DataFrame,
+        numeric_cols: List[str],
+    ) -> pd.Series:
+        """
+        Generate synthetic failure labels from multi-parameter stress indicators.
+
+        This method is intentionally reusable by the ensemble orchestrator
+        to keep label semantics consistent across models.
+        """
+        if not numeric_cols:
+            return pd.Series(0, index=df.index, dtype=int)
+
+        data = self._sanitize_numeric(df[numeric_cols].copy())
+
+        band_viol = pd.DataFrame(index=data.index)
+        for col in numeric_cols:
+            p10, p90 = data[col].quantile(0.10), data[col].quantile(0.90)
+            band_viol[col] = ((data[col] < p10) | (data[col] > p90)).astype(int)
+        multi = (band_viol.sum(axis=1) >= 2).astype(int)
+
+        roc_stress = pd.Series(0, index=data.index)
+        for col in numeric_cols:
+            roc = data[col].diff().abs().fillna(0)
+            roc_stress = roc_stress | (roc > roc.quantile(0.95)).astype(int)
+
+        labels = ((multi | roc_stress) > 0).astype(int)
+        if labels.sum() < 5:
+            labels.iloc[-min(10, len(labels)) :] = 1
+        return labels
 
     def predict(
         self,

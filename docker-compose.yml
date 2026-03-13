@@ -64,6 +64,19 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: analytics_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - energy-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   createbuckets:
     image: minio/mc
     depends_on:
@@ -185,6 +198,7 @@ services:
     build: ./services/analytics-service
     container_name: analytics-service
     environment:
+      - APP_ROLE=api
       - APP_ENV=development
       - LOG_LEVEL=INFO
       - API_PORT=8003
@@ -197,6 +211,12 @@ services:
       - S3_ACCESS_KEY_ID=minio
       - S3_SECRET_ACCESS_KEY=minio123
       - S3_BUCKET_NAME=energy-platform-datasets
+      - QUEUE_BACKEND=redis
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_STREAM_NAME=analytics_jobs_stream
+      - REDIS_DEAD_LETTER_STREAM=analytics_jobs_dead_letter
+      - REDIS_CONSUMER_GROUP=analytics_workers
+      - REDIS_CONSUMER_NAME=analytics-api
     ports:
       - "8003:8003"
     depends_on:
@@ -204,6 +224,45 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - energy-net
+
+  analytics-worker:
+    build: ./services/analytics-service
+    container_name: analytics-worker
+    environment:
+      - APP_ROLE=worker
+      - APP_ENV=development
+      - LOG_LEVEL=INFO
+      - API_PORT=8003
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=ai_factoryops
+      - MYSQL_USER=energy
+      - MYSQL_PASSWORD=energy
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY_ID=minio
+      - S3_SECRET_ACCESS_KEY=minio123
+      - S3_BUCKET_NAME=energy-platform-datasets
+      - QUEUE_BACKEND=redis
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_STREAM_NAME=analytics_jobs_stream
+      - REDIS_DEAD_LETTER_STREAM=analytics_jobs_dead_letter
+      - REDIS_CONSUMER_GROUP=analytics_workers
+      - REDIS_CONSUMER_NAME=analytics-worker-1
+      - MAX_CONCURRENT_JOBS=1
+      - ML_WEEKLY_RETRAINER_ENABLED=false
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      analytics-service:
+        condition: service_started
     networks:
       - energy-net
 
