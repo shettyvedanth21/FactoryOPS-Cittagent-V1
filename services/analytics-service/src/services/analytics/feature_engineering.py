@@ -71,6 +71,6 @@ class FeatureEngineer:
                 df[f"{feature}_lag_5"] = df[feature].shift(5).fillna(df[feature])
         
         # Fill NaN values
-        df = df.fillna(method="ffill").fillna(method="bfill").fillna(0)
+        df = df.ffill().bfill().fillna(0)
         
         return df

@@ -82,6 +82,7 @@ class AnomalyDetectionPipeline(BasePipeline):
             "model": model,
             "scaler": scaler,
             "columns": cols,
+            "feature_cols": cols,  # backward compatibility for older tests/consumers
             "single_parameter_mode": len(cols) == 1,
             "confidence": confidence.to_dict(),
         }

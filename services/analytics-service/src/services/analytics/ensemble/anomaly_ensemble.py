@@ -20,6 +20,18 @@ SEQUENCE_LENGTH = 30
 class AnomalyEnsemble:
     """Runs IF + LSTM autoencoder + CUSUM and combines via voting."""
 
+    @staticmethod
+    def _parse_utc_timestamps(values: Any) -> pd.DatetimeIndex:
+        """Parse mixed timestamp values deterministically without inference warnings."""
+        if isinstance(values, pd.DatetimeIndex):
+            return values.tz_convert("UTC") if values.tz is not None else values.tz_localize("UTC")
+        series = pd.Series(values)
+        if pd.api.types.is_datetime64_any_dtype(series):
+            parsed = pd.to_datetime(series, utc=True, errors="coerce")
+        else:
+            parsed = pd.to_datetime(series, format="ISO8601", utc=True, errors="coerce")
+        return pd.DatetimeIndex(parsed)
+
     def run(self, df: pd.DataFrame, parameters: Dict[str, Any] | None = None) -> Dict[str, Any]:
         params = parameters or {}
         fe = FeatureEngineer()
@@ -62,9 +74,9 @@ class AnomalyEnsemble:
             lstm_raw = lstm_ae.predict(sequences)
 
             if isinstance(if_result.get("point_timestamps"), list):
-                target_ts = pd.to_datetime(if_result["point_timestamps"], utc=True, errors="coerce")
+                target_ts = self._parse_utc_timestamps(if_result["point_timestamps"])
             else:
-                target_ts = pd.to_datetime(base.index, utc=True, errors="coerce")
+                target_ts = self._parse_utc_timestamps(base.index)
 
             ts_index_map = {pd.Timestamp(t).isoformat(): i for i, t in enumerate(ts)}
             is_anomaly = np.zeros(len(target_ts), dtype=bool)
@@ -173,11 +185,11 @@ class AnomalyEnsemble:
         base["timestamp"] = pd.to_datetime(base["timestamp"], utc=True, errors="coerce")
         base = base.dropna(subset=["timestamp"]).sort_values("timestamp")
         if not numeric_cols:
-            return pd.DataFrame(index=pd.to_datetime(target_ts, utc=True, errors="coerce"))
+            return pd.DataFrame(index=AnomalyEnsemble._parse_utc_timestamps(target_ts))
         clean = base[["timestamp"] + [c for c in numeric_cols if c in base.columns]].copy()
         clean = clean.set_index("timestamp").resample("1min").mean()
         clean = clean.ffill(limit=15).bfill(limit=15).fillna(0)
-        idx = pd.to_datetime(target_ts, utc=True, errors="coerce")
+        idx = AnomalyEnsemble._parse_utc_timestamps(target_ts)
         return clean.reindex(idx, method="nearest").fillna(0)
 
     @staticmethod

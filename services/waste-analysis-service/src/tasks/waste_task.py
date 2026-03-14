@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, time
 from uuid import uuid4
 
@@ -35,6 +36,12 @@ TELEMETRY_FIELDS = [
     "power_factor",
     "pf",
 ]
+
+
+def _effective_concurrency(configured: int) -> int:
+    cpu = max(1, int(os.cpu_count() or 1))
+    safe_upper = max(4, cpu * 4)
+    return max(1, min(int(configured), safe_upper))
 
 
 async def _resolve_devices(scope: str, requested_ids: list[str] | None) -> list[dict]:
@@ -180,7 +187,14 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             config_warnings: list[str] = []
             skipped_devices: list[dict] = []
 
-            cfg_sem = asyncio.Semaphore(max(1, settings.WASTE_DEVICE_CONCURRENCY))
+            eff_conc = _effective_concurrency(settings.WASTE_DEVICE_CONCURRENCY)
+            logger.info(
+                "waste_device_concurrency_resolved configured=%s effective=%s cpu_count=%s",
+                int(settings.WASTE_DEVICE_CONCURRENCY),
+                eff_conc,
+                max(1, int(os.cpu_count() or 1)),
+            )
+            cfg_sem = asyncio.Semaphore(eff_conc)
 
             async def _load_device_config(
                 d: dict,
@@ -241,7 +255,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             results = []
             warnings: list[str] = list(config_warnings)
             n_devices = max(1, len(devices))
-            dev_sem = asyncio.Semaphore(max(1, settings.WASTE_DEVICE_CONCURRENCY))
+            dev_sem = asyncio.Semaphore(eff_conc)
 
             async def _process_device(d: dict):
                 device_id = d.get("device_id")

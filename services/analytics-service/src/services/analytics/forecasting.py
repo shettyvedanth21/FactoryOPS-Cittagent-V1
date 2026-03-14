@@ -102,7 +102,12 @@ class ForecastingPipeline(BasePipeline):
     ) -> Dict[str, Any]:
 
         ts_col, target_col = self._resolve_columns(train_df, params)
-        from prophet import Prophet
+        try:
+            from prophet import Prophet
+        except Exception as e:
+            raise RuntimeError(
+                "Prophet backend unavailable. Install/enable prophet and pystan/cmdstan backend."
+            ) from e
 
         prophet_df = pd.DataFrame(
             {
@@ -113,13 +118,23 @@ class ForecastingPipeline(BasePipeline):
             }
         )
 
-        model = Prophet(
-            daily_seasonality=params.get("daily_seasonality", True),
-            weekly_seasonality=params.get("weekly_seasonality", True),
-            yearly_seasonality=params.get("yearly_seasonality", False),
-        )
+        try:
+            model = Prophet(
+                daily_seasonality=params.get("daily_seasonality", True),
+                weekly_seasonality=params.get("weekly_seasonality", True),
+                yearly_seasonality=params.get("yearly_seasonality", False),
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Prophet backend initialization failed."
+            ) from e
 
-        model.fit(prophet_df)
+        try:
+            model.fit(prophet_df)
+        except Exception as e:
+            raise RuntimeError(
+                "Prophet backend initialization failed during fit."
+            ) from e
 
         return {
             "model_type": "prophet",

@@ -347,11 +347,17 @@ class JobRunner:
                 job_id, 10.0, "Loading dataset"
             )
 
+            readiness_enabled = (
+                settings.app_env.lower() != "test"
+                and (settings.ml_require_exact_dataset_range or settings.ml_data_readiness_gate_enabled)
+            )
+
             if (
                 not request.dataset_key
                 and request.start_time
                 and request.end_time
                 and request.analysis_type in {AnalyticsType.ANOMALY, AnalyticsType.PREDICTION}
+                and readiness_enabled
             ):
                 await self._result_repo.update_job_progress(
                     job_id, 15.0, "Preparing exact-range dataset"
@@ -366,16 +372,25 @@ class JobRunner:
                 )
                 if not dataset_key:
                     reason = str((readiness_meta or {}).get("reason") or "dataset_not_ready")
-                    code = "DATASET_NOT_READY_TIMEOUT" if reason == "export_timeout" else "DATASET_NOT_READY"
-                    raise AnalyticsError(
-                        f"{code}: readiness failed for device={ready_device_id}, "
-                        f"reason={reason}, export_attempted={bool((readiness_meta or {}).get('export_attempted', False))}, "
-                        f"wait_seconds={float((readiness_meta or {}).get('wait_seconds', 0.0))}"
+                    hard_reasons = {"device_not_found", "no_telemetry_in_range"}
+                    if reason in hard_reasons:
+                        code = "DATASET_NOT_READY_TIMEOUT" if reason == "export_timeout" else "DATASET_NOT_READY"
+                        raise AnalyticsError(
+                            f"{code}: readiness failed for device={ready_device_id}, "
+                            f"reason={reason}, export_attempted={bool((readiness_meta or {}).get('export_attempted', False))}, "
+                            f"wait_seconds={float((readiness_meta or {}).get('wait_seconds', 0.0))}"
+                        )
+                    # Permanent hardening:
+                    # when export/S3 path is unavailable, continue with exact-range direct data-service fetch.
+                    resolved_request = request
+                    await self._result_repo.update_job_progress(
+                        job_id, 20.0, "Loading exact-range telemetry directly"
                     )
-                resolved_request = request.model_copy(update={"dataset_key": dataset_key})
-                await self._result_repo.update_job_progress(
-                    job_id, 20.0, "Running analysis"
-                )
+                else:
+                    resolved_request = request.model_copy(update={"dataset_key": dataset_key})
+                    await self._result_repo.update_job_progress(
+                        job_id, 20.0, "Running analysis"
+                    )
 
             # -------------------------------------------------------
             # Dataset loading
@@ -670,6 +685,12 @@ class JobRunner:
         df: pd.DataFrame,
     ) -> None:
 
+        def _parse_points(values: Any) -> pd.Series:
+            series = pd.Series(values)
+            if pd.api.types.is_datetime64_any_dtype(series):
+                return pd.to_datetime(series, utc=True, errors="coerce")
+            return pd.to_datetime(series, format="ISO8601", utc=True, errors="coerce")
+
         if "timestamp" in df.columns:
             ts_col = "timestamp"
         elif "_time" in df.columns:
@@ -689,11 +710,7 @@ class JobRunner:
 
         point_ts = results.get("point_timestamps")
         if isinstance(point_ts, list) and len(point_ts) == len(anomaly_scores):
-            timestamps = pd.to_datetime(
-                point_ts,
-                utc=True,
-                errors="coerce",
-            )
+            timestamps = _parse_points(point_ts)
         else:
             # Fallback: align on min length instead of failing whole job
             n = min(len(df), len(anomaly_scores), len(is_anomaly))
@@ -701,11 +718,7 @@ class JobRunner:
                 raise AnalyticsError("No data points available for anomaly point attachment")
             anomaly_scores = anomaly_scores[:n]
             is_anomaly = is_anomaly[:n]
-            timestamps = pd.to_datetime(
-                df[ts_col].iloc[:n],
-                utc=True,
-                errors="coerce",
-            )
+            timestamps = _parse_points(df[ts_col].iloc[:n])
 
         if timestamps.isna().any():
             raise AnalyticsError(

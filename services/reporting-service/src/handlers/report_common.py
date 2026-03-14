@@ -16,7 +16,7 @@ router = APIRouter(tags=["reports"])
 
 @router.get("/history")
 async def list_reports(
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     report_type: Optional[str] = Query(None),
@@ -42,7 +42,7 @@ async def list_reports(
 @router.post("/schedules")
 async def create_schedule(
     data: dict,
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     db: AsyncSession = Depends(get_db)
 ):
     data["tenant_id"] = tenant_id
@@ -62,7 +62,7 @@ async def create_schedule(
 
 @router.get("/schedules")
 async def list_schedules(
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     db: AsyncSession = Depends(get_db)
 ):
     repo = ScheduledRepository(db)
@@ -90,7 +90,7 @@ async def list_schedules(
 @router.delete("/schedules/{schedule_id}")
 async def delete_schedule(
     schedule_id: str,
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     db: AsyncSession = Depends(get_db)
 ):
     repo = ScheduledRepository(db)

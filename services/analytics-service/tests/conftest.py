@@ -1,23 +1,29 @@
 """Test configuration and fixtures."""
 
-import asyncio
+import os
 from datetime import datetime, timedelta
-from typing import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
-import pytest_asyncio
 
 from src.config.settings import Settings
+from src.config.settings import get_settings
 
 
-@pytest.fixture(scope="session")
-def event_loop() -> Generator:
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+@pytest.fixture(autouse=True)
+def _force_test_settings_env():
+    old = os.environ.get("APP_ENV")
+    os.environ["APP_ENV"] = "test"
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("APP_ENV", None)
+        else:
+            os.environ["APP_ENV"] = old
+        get_settings.cache_clear()
 
 
 @pytest.fixture

@@ -31,6 +31,9 @@ class FailurePredictionPipeline(BasePipeline):
         clean = clean.set_index("timestamp").resample("1min").mean().reset_index()
         clean[cols] = clean[cols].ffill(limit=15).bfill(limit=15)
         clean[cols] = self._sanitize_numeric(clean[cols])
+        labels = self._generate_labels(clean[["timestamp"] + cols].copy(), cols)
+        clean["failure_label"] = labels.astype(int)
+        clean["failure"] = clean["failure_label"]  # backward compatibility alias
 
         split = max(int(len(clean) * 0.8), MIN_POINTS)
         split = min(split, len(clean))
@@ -71,6 +74,7 @@ class FailurePredictionPipeline(BasePipeline):
             "model": model,
             "scaler": scaler,
             "columns": cols,
+            "feature_cols": cols,  # backward compatibility for older tests/consumers
             "feature_names": features.columns.tolist(),
             "train_data": data,
             "confidence": confidence.to_dict(),
@@ -299,6 +303,9 @@ class FailurePredictionPipeline(BasePipeline):
             "device_id",
             "schema_version",
             "enrichment_status",
+            "failure",
+            "failure_label",
+            "predicted_failure",
             "table",
             "hour",
             "minute",

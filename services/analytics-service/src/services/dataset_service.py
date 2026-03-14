@@ -2,9 +2,10 @@
 
 import io
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
+import httpx
 import pandas as pd
 import structlog
 
@@ -129,11 +130,95 @@ class DatasetService:
                         fallback_key=fallback_key,
                         reason="fallback_does_not_cover_requested_range",
                     )
+                live_df = await self._load_from_data_service(
+                    device_id=device_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                if not live_df.empty:
+                    self._logger.warning(
+                        "dataset_loaded_from_data_service_fallback",
+                        device_id=device_id,
+                        rows=len(live_df),
+                        requested_key=s3_key,
+                    )
+                    return live_df
 
             if not_found:
                 raise DatasetNotFoundError(f"Dataset not found: {s3_key}")
 
             raise DatasetReadError(f"Failed to read dataset: {e}") from e
+
+    async def _load_from_data_service(
+        self,
+        device_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> pd.DataFrame:
+        """Load exact-range telemetry directly from data-service as a hard fallback."""
+        settings = get_settings()
+        url = f"{settings.data_service_url}/api/v1/data/telemetry/{device_id}"
+        chunk_hours = max(1, int(settings.data_service_fallback_chunk_hours))
+        query_limit = max(1, int(settings.data_service_query_limit))
+        all_items: list[dict] = []
+
+        async def _fetch_chunk(client: httpx.AsyncClient, chunk_start: datetime, chunk_end: datetime) -> list[dict]:
+            params = {
+                "start_time": chunk_start.isoformat(),
+                "end_time": chunk_end.isoformat(),
+                "limit": query_limit,
+            }
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            body = resp.json()
+            items = []
+            if isinstance(body, dict):
+                data = body.get("data", {})
+                if isinstance(data, dict):
+                    items = data.get("items", []) or []
+                elif isinstance(data, list):
+                    items = data
+            elif isinstance(body, list):
+                items = body
+            return [x for x in items if isinstance(x, dict)]
+
+        try:
+            async with httpx.AsyncClient(timeout=float(settings.data_service_query_timeout_seconds)) as client:
+                cursor = start_time
+                while cursor < end_time:
+                    chunk_end = min(end_time, cursor + timedelta(hours=chunk_hours))
+                    items = await _fetch_chunk(client, cursor, chunk_end)
+                    all_items.extend(items)
+                    if len(items) >= query_limit:
+                        self._logger.warning(
+                            "data_service_fallback_chunk_hit_limit",
+                            device_id=device_id,
+                            chunk_start=cursor.isoformat(),
+                            chunk_end=chunk_end.isoformat(),
+                            limit=query_limit,
+                        )
+                    cursor = chunk_end
+        except Exception as e:
+            self._logger.warning(
+                "data_service_fallback_failed",
+                device_id=device_id,
+                error=str(e),
+            )
+            return pd.DataFrame()
+
+        if not all_items:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_items)
+        if df.empty:
+            return df
+        if "timestamp" not in df.columns and "_time" in df.columns:
+            df = df.rename(columns={"_time": "timestamp"})
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+            df = df.drop_duplicates(subset=["timestamp"], keep="last")
+        return df.reset_index(drop=True)
 
     def _construct_s3_key(
         self,

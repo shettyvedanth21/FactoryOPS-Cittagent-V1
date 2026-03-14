@@ -3,6 +3,7 @@
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -87,3 +88,34 @@ class TestJobRunner:
             call for call in mock_result_repository.update_job_progress.call_args_list
         ]
         assert len(progress_calls) > 0
+
+    @pytest.mark.asyncio
+    async def test_run_job_falls_back_to_direct_data_when_readiness_unavailable(
+        self, job_runner, mock_result_repository, sample_telemetry_data
+    ):
+        """If export/S3 readiness path times out, job should still run via direct exact-range load."""
+        job_runner._dataset_service.load_dataset = AsyncMock(return_value=sample_telemetry_data)
+        request = AnalyticsRequest(
+            device_id="D1",
+            start_time=datetime.now() - timedelta(days=1),
+            end_time=datetime.now(),
+            analysis_type=AnalyticsType.ANOMALY,
+            model_name="isolation_forest",
+        )
+
+        with patch(
+            "src.services.job_runner.ensure_device_ready",
+            AsyncMock(return_value=("D1", None, {"reason": "export_timeout", "export_attempted": True, "wait_seconds": 60.0})),
+        ), patch(
+            "src.services.job_runner.get_settings",
+            return_value=MagicMock(
+                app_env="development",
+                ml_require_exact_dataset_range=True,
+                ml_data_readiness_gate_enabled=True,
+                ml_formatted_results_enabled=True,
+            ),
+        ):
+            await job_runner.run_job("test-job-fallback-123", request)
+
+        final_call = mock_result_repository.update_job_status.call_args_list[-1]
+        assert final_call.kwargs["status"] == JobStatus.COMPLETED

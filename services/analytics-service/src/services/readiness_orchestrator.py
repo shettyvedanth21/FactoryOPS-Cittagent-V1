@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import re
 from datetime import datetime, timezone
@@ -28,7 +29,16 @@ def _get_readiness_semaphore() -> asyncio.Semaphore:
     global _readiness_semaphore
     if _readiness_semaphore is None:
         settings = get_settings()
-        _readiness_semaphore = asyncio.Semaphore(max(1, settings.data_readiness_max_concurrency))
+        cpu = max(1, int(os.cpu_count() or 1))
+        safe_upper = max(2, cpu * 4)
+        effective = max(1, min(int(settings.data_readiness_max_concurrency), safe_upper))
+        _readiness_semaphore = asyncio.Semaphore(effective)
+        logger.info(
+            "data_readiness_concurrency_resolved",
+            configured=int(settings.data_readiness_max_concurrency),
+            effective=effective,
+            cpu_count=cpu,
+        )
     return _readiness_semaphore
 
 
@@ -148,10 +158,14 @@ async def wait_for_dataset_key(
     expected_key: str,
     data_export_service_url: str,
     s3_client: S3Client,
+    timeout_seconds_override: Optional[int] = None,
 ) -> Tuple[Optional[str], str, float]:
     settings = get_settings()
     delay = max(1, int(settings.data_readiness_initial_delay_seconds))
-    timeout_seconds = max(delay, int(settings.data_readiness_wait_timeout_seconds))
+    timeout_seconds = max(
+        delay,
+        int(timeout_seconds_override if timeout_seconds_override is not None else settings.data_readiness_wait_timeout_seconds),
+    )
     max_attempts = max(int(timeout_seconds / delay) + 1, int(settings.data_readiness_poll_attempts))
 
     start = datetime.now(timezone.utc)
@@ -259,7 +273,7 @@ async def ensure_device_ready(
 
         if should_trigger:
             export_response, export_error = await _trigger_export_with_retries(device_id, start_time, end_time)
-            if export_error:
+            if export_error in {"device_not_found", "no_telemetry_in_range"}:
                 return device_id, None, {
                     "ready": False,
                     "reason": export_error,
@@ -268,6 +282,13 @@ async def ensure_device_ready(
                     "suppression_backend": suppression_backend,
                     "wait_seconds": 0.0,
                 }
+            if export_error:
+                logger.warning(
+                    "data_readiness_export_trigger_non_terminal_error",
+                    device_id=device_id,
+                    expected_key=expected_key,
+                    reason=export_error,
+                )
             logger.info(
                 "data_readiness_export_triggered",
                 device_id=device_id,
@@ -288,12 +309,58 @@ async def ensure_device_ready(
             data_export_service_url=settings.data_export_service_url,
             s3_client=s3_client,
         )
+        if not resolved_key and wait_reason == "export_timeout":
+            # One additional bounded grace cycle for slow export completion.
+            # Keep it deterministic and non-hammering (single re-trigger + extended wait).
+            retry_export_response, retry_export_error = await _trigger_export_with_retries(
+                device_id=device_id,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            if retry_export_error in {"device_not_found", "no_telemetry_in_range"}:
+                return device_id, None, {
+                    "ready": False,
+                    "reason": retry_export_error,
+                    "export_attempted": True,
+                    "export_suppressed": False,
+                    "suppression_backend": suppression_backend,
+                    "wait_seconds": wait_seconds,
+                }
+            if retry_export_error:
+                logger.warning(
+                    "data_readiness_export_retrigger_non_terminal_error",
+                    device_id=device_id,
+                    expected_key=expected_key,
+                    reason=retry_export_error,
+                )
+            else:
+                logger.info(
+                    "data_readiness_export_retriggered",
+                    device_id=device_id,
+                    expected_key=expected_key,
+                    export_response=retry_export_response or {},
+                )
+
+            extended_timeout = max(
+                int(settings.data_readiness_wait_timeout_seconds),
+                int(settings.data_readiness_extended_wait_timeout_seconds),
+            )
+            resolved_key, wait_reason, extra_wait_seconds = await wait_for_dataset_key(
+                device_id=device_id,
+                expected_key=expected_key,
+                data_export_service_url=settings.data_export_service_url,
+                s3_client=s3_client,
+                timeout_seconds_override=extended_timeout,
+            )
+            wait_seconds = round(float(wait_seconds) + float(extra_wait_seconds), 2)
+
         if resolved_key:
             return device_id, resolved_key, {
                 "ready": True,
                 "reason": wait_reason,
                 "export_attempted": should_trigger,
                 "export_suppressed": not should_trigger,
+                "export_trigger_error": export_error if should_trigger else None,
                 "suppression_backend": suppression_backend,
                 "wait_seconds": wait_seconds,
             }
@@ -302,6 +369,7 @@ async def ensure_device_ready(
             "reason": wait_reason,
             "export_attempted": should_trigger,
             "export_suppressed": not should_trigger,
+            "export_trigger_error": export_error if should_trigger else None,
             "suppression_backend": suppression_backend,
             "wait_seconds": wait_seconds,
         }

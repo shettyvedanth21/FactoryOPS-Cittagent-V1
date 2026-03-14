@@ -77,13 +77,18 @@ class Settings(BaseSettings):
     ml_require_exact_dataset_range: bool = Field(default=True)
 
     data_export_service_url: str = Field(default="http://data-export-service:8080")
+    data_service_url: str = Field(default="http://data-service:8081")
     data_readiness_poll_attempts: int = Field(default=3)
     data_readiness_initial_delay_seconds: int = Field(default=5)
     data_readiness_wait_timeout_seconds: int = Field(default=180)
+    data_readiness_extended_wait_timeout_seconds: int = Field(default=480)
     data_readiness_max_concurrency: int = Field(default=3)
     data_readiness_export_cooldown_seconds: int = Field(default=30)
     data_readiness_trigger_retries: int = Field(default=3)
     data_readiness_status_retries: int = Field(default=2)
+    data_service_query_timeout_seconds: int = Field(default=30)
+    data_service_query_limit: int = Field(default=10000)
+    data_service_fallback_chunk_hours: int = Field(default=6)
 
     @property
     def mysql_dsn(self) -> str:

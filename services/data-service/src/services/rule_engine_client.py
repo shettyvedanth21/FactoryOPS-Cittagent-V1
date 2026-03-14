@@ -1,6 +1,7 @@
 """Rule Engine client for asynchronous rule evaluation."""
 
 import asyncio
+import time
 from typing import Any, Dict, Optional
 
 import httpx
@@ -20,7 +21,10 @@ logger = get_logger(__name__)
 
 class RuleEngineError(Exception):
     """Raised when rule engine call fails."""
-    pass
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class RuleEngineClient:
@@ -56,6 +60,8 @@ class RuleEngineClient:
         self._failure_count = 0
         self._circuit_threshold = 5
         self._circuit_timeout = 30
+        self._circuit_opened_at = 0.0
+        self._circuit_probe_interval = 5.0
         
         logger.info(
             "RuleEngineClient initialized",
@@ -70,27 +76,67 @@ class RuleEngineClient:
     ) -> None:
         """Asynchronously evaluate rules for telemetry payload."""
         if self._circuit_open:
-            logger.warning(
-                "Circuit breaker open, skipping rule evaluation",
-                device_id=payload.device_id,
-            )
-            return
-        
+            now = time.monotonic()
+            if (now - self._circuit_opened_at) >= self._circuit_probe_interval:
+                # Half-open probe: attempt evaluation periodically and auto-close on success.
+                logger.info(
+                    "Circuit breaker half-open probe",
+                    device_id=payload.device_id,
+                    failure_count=self._failure_count,
+                )
+            else:
+                logger.warning(
+                    "Circuit breaker open, skipping rule evaluation",
+                    device_id=payload.device_id,
+                )
+                return
+
         try:
             await self._send_evaluation_request(payload)
             self._failure_count = 0
-            
-        except Exception as e:
+            if self._circuit_open:
+                self._circuit_open = False
+                logger.info("Circuit breaker closed after successful probe")
+
+        except RuleEngineError as e:
+            if not e.retryable:
+                logger.warning(
+                    "Non-retryable rule evaluation error",
+                    device_id=payload.device_id,
+                    error=str(e),
+                )
+                return
+
             self._failure_count += 1
-            
-            if self._failure_count >= self._circuit_threshold:
+
+            if self._failure_count >= self._circuit_threshold and not self._circuit_open:
                 self._circuit_open = True
+                self._circuit_opened_at = time.monotonic()
                 logger.error(
                     "Circuit breaker opened due to repeated failures",
                     failure_count=self._failure_count,
                 )
                 asyncio.create_task(self._reset_circuit())
-            
+
+            logger.warning(
+                "Rule evaluation failed (retryable)",
+                device_id=payload.device_id,
+                error=str(e),
+                retry_count=self.max_retries,
+            )
+
+        except Exception as e:
+            self._failure_count += 1
+
+            if self._failure_count >= self._circuit_threshold and not self._circuit_open:
+                self._circuit_open = True
+                self._circuit_opened_at = time.monotonic()
+                logger.error(
+                    "Circuit breaker opened due to repeated failures",
+                    failure_count=self._failure_count,
+                )
+                asyncio.create_task(self._reset_circuit())
+
             logger.error(
                 "Rule evaluation failed",
                 device_id=payload.device_id,
@@ -139,16 +185,19 @@ class RuleEngineClient:
             )
             
         except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
             logger.warning(
                 "Rule engine returned error status",
                 device_id=payload.device_id,
-                status_code=e.response.status_code,
+                status_code=status_code,
                 response=e.response.text,
             )
-            raise RuleEngineError(f"HTTP error: {e.response.status_code}") from e
+            if 400 <= status_code < 500:
+                raise RuleEngineError(f"HTTP client error: {status_code}", retryable=False) from e
+            raise RuleEngineError(f"HTTP server error: {status_code}", retryable=True) from e
             
         except httpx.RequestError as e:
-            raise RuleEngineError(f"Request error: {e}") from e
+            raise RuleEngineError(f"Request error: {e}", retryable=True) from e
     
     async def _reset_circuit(self) -> None:
         """Reset circuit breaker after timeout."""
