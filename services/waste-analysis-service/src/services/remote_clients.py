@@ -96,6 +96,22 @@ class DeviceClient:
             threshold = cfg.get("idle_current_threshold")
             return float(threshold) if threshold is not None else None
 
+    async def get_waste_config(self, device_id: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{settings.DEVICE_SERVICE_URL}/api/v1/devices/{device_id}/waste-config")
+            if resp.status_code != 200:
+                return {}
+            payload = resp.json()
+            return payload.get("data", payload) if isinstance(payload, dict) else {}
+
+    async def get_site_waste_config(self) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{settings.DEVICE_SERVICE_URL}/api/v1/settings/waste-config")
+            if resp.status_code != 200:
+                return {}
+            payload = resp.json()
+            return payload.get("data", payload) if isinstance(payload, dict) else {}
+
 
 tariff_cache = TariffCache()
 device_client = DeviceClient()

@@ -807,6 +807,12 @@ function AnalyticsPageContent() {
   }
 
   if (screen === "fleet" && result && result.analysis_type === "fleet") {
+    const exec = (result as any).execution_metadata ?? {};
+    const skipped = Array.isArray(exec.devices_skipped) ? exec.devices_skipped : [];
+    const failed = Array.isArray(exec.devices_failed) ? exec.devices_failed : [];
+    const readyCount = Array.isArray(exec.devices_ready) ? exec.devices_ready.length : result.device_summaries.length;
+    const selectedCount = Number(exec.selected_device_count ?? readyCount + skipped.length + failed.length);
+    const coverage = Number(exec.coverage_pct ?? (selectedCount > 0 ? (readyCount / selectedCount) * 100 : 0));
     return (
       <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "'DM Sans','Segoe UI',sans-serif", padding: 12 }}>
         <div style={{ maxWidth: 900, margin: "0 auto", display: "grid", gap: 8 }}>
@@ -815,6 +821,28 @@ function AnalyticsPageContent() {
             <Stat label="Fleet Health" value={`${result.fleet_health_score}%`} />
             <Stat label="Worst Device" value={result.worst_device_id || "N/A"} />
             <Stat label="Critical Devices" value={String(result.critical_devices.length)} />
+          </div>
+          <div style={panelStyle()}>
+            <h3 style={titleStyle()}>Fleet Data Coverage</h3>
+            <div style={{ fontSize: 11, color: COLORS.muted }}>
+              Analyzed <b style={{ color: COLORS.text }}>{readyCount}</b> / <b style={{ color: COLORS.text }}>{selectedCount}</b> devices
+              {" · "}
+              Coverage <b style={{ color: COLORS.text }}>{coverage.toFixed(1)}%</b>
+            </div>
+            {(skipped.length > 0 || failed.length > 0) && (
+              <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+                {[...skipped, ...failed].slice(0, 20).map((item: any, idx: number) => (
+                  <div key={`skip-${idx}`} style={{ fontSize: 11, color: COLORS.bad }}>
+                    {item.device_id}: {item.message || item.reason || "Not analyzed"}
+                  </div>
+                ))}
+                {skipped.length + failed.length > 20 && (
+                  <div style={{ fontSize: 10, color: COLORS.muted }}>
+                    +{skipped.length + failed.length - 20} more devices omitted
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div style={panelStyle()}>
             <h3 style={titleStyle()}>Device Summaries</h3>

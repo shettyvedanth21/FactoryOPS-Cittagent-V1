@@ -34,8 +34,11 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
     TARIFF_CACHE_TTL_SECONDS: int = 60
-    WASTE_STRICT_QUALITY_GATE: bool = True
+    WASTE_STRICT_QUALITY_GATE: bool = False
     WASTE_JOB_TIMEOUT_SECONDS: int = 600
+    WASTE_DEVICE_CONCURRENCY: int = 16
+    WASTE_DB_BATCH_SIZE: int = 500
+    WASTE_PDF_MAX_DEVICES: int = 200
 
 
 settings = Settings()

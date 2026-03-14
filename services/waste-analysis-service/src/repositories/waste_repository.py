@@ -65,6 +65,17 @@ class WasteRepository:
             self.db.add(WasteDeviceSummary(job_id=job_id, **s))
         await self.db.commit()
 
+    async def replace_device_summaries_chunked(self, job_id: str, summaries: list[dict], batch_size: int = 500) -> None:
+        await self.db.execute(delete(WasteDeviceSummary).where(WasteDeviceSummary.job_id == job_id))
+        await self.db.commit()
+
+        size = max(1, int(batch_size))
+        for i in range(0, len(summaries), size):
+            batch = summaries[i : i + size]
+            for s in batch:
+                self.db.add(WasteDeviceSummary(job_id=job_id, **s))
+            await self.db.commit()
+
     async def list_device_summaries(self, job_id: str) -> list[WasteDeviceSummary]:
         result = await self.db.execute(
             select(WasteDeviceSummary)

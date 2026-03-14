@@ -5,6 +5,7 @@ from app.models.device import (
     DeviceStatus,
     DeviceDashboardWidget,
     DeviceDashboardWidgetSetting,
+    WasteSiteConfig,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "DeviceStatus",
     "DeviceDashboardWidget",
     "DeviceDashboardWidgetSetting",
+    "WasteSiteConfig",
 ]

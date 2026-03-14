@@ -110,7 +110,7 @@ async def delete_schedule(
 @router.get("/{report_id}/status")
 async def get_report_status(
     report_id: str,
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     db: AsyncSession = Depends(get_db)
 ):
     repo = ReportRepository(db)
@@ -131,7 +131,7 @@ async def get_report_status(
 @router.get("/{report_id}/result")
 async def get_report_result(
     report_id: str,
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     db: AsyncSession = Depends(get_db)
 ):
     repo = ReportRepository(db)
@@ -149,7 +149,7 @@ async def get_report_result(
 @router.get("/{report_id}/download")
 async def download_report(
     report_id: str,
-    tenant_id: str = Query(...),
+    tenant_id: str = Query("default"),
     db: AsyncSession = Depends(get_db)
 ):
     repo = ReportRepository(db)

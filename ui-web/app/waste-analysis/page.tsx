@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { getDevices, Device, getIdleConfig } from "@/lib/deviceApi";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getDevices, Device } from "@/lib/deviceApi";
 import { getTariffConfig } from "@/lib/settingsApi";
 import { formatIST } from "@/lib/utils";
 import {
@@ -24,6 +24,88 @@ interface WasteHistoryRow {
   created_at?: string;
   completed_at?: string;
   progress_pct: number;
+}
+
+interface WastageCategoryView {
+  duration_sec?: number | null;
+  energy_kwh?: number | null;
+  cost?: number | null;
+  skipped_reason?: string | null;
+  pf_estimated?: boolean;
+  config_source?: string | null;
+  config_used?: Record<string, unknown> | null;
+}
+
+interface WasteResultDevice {
+  device_id: string;
+  device_name?: string;
+  off_hours?: WastageCategoryView;
+  overconsumption?: WastageCategoryView;
+  offhours_duration_sec?: number | null;
+  offhours_energy_kwh?: number | null;
+  offhours_cost?: number | null;
+  offhours_skipped_reason?: string | null;
+  offhours_pf_estimated?: boolean;
+  overconsumption_duration_sec?: number | null;
+  overconsumption_kwh?: number | null;
+  overconsumption_cost?: number | null;
+  overconsumption_skipped_reason?: string | null;
+  overconsumption_pf_estimated?: boolean;
+}
+
+interface WasteResultPayload {
+  total_waste_cost?: number | null;
+  device_summaries?: WasteResultDevice[];
+}
+
+function formatDurationSeconds(seconds?: number | null): string {
+  if (seconds == null) return "—";
+  const mins = Math.round(seconds / 60);
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h} hr ${m} min` : `${m} min`;
+}
+
+function WastageRow({
+  label,
+  duration,
+  kwh,
+  cost,
+  skippedReason,
+  pfEstimated,
+  configSource,
+}: {
+  label: string;
+  duration?: number | null;
+  kwh?: number | null;
+  cost?: number | null;
+  skippedReason?: string | null;
+  pfEstimated?: boolean;
+  configSource?: string | null;
+}) {
+  if (skippedReason) {
+    return (
+      <tr className="text-gray-400">
+        <td className="py-2 pr-4">{label}</td>
+        <td colSpan={3} className="py-2 pr-4 text-sm italic">{skippedReason}</td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr>
+      <td className="py-2 pr-4">
+        {label}
+        {pfEstimated && <span className="ml-1 text-xs text-amber-700" title="Power factor estimated at 0.85">*</span>}
+        {configSource && (
+          <span className="ml-2 text-[10px] uppercase tracking-wide text-slate-500">({configSource})</span>
+        )}
+      </td>
+      <td className="py-2 pr-4">{formatDurationSeconds(duration)}</td>
+      <td className="py-2 pr-4">{kwh != null ? `${Number(kwh).toFixed(2)} kWh` : "—"}</td>
+      <td className="py-2 pr-4">{cost != null ? `₹${Number(cost).toFixed(2)}` : "—"}</td>
+    </tr>
+  );
 }
 
 function isoDate(d: Date): string {
@@ -51,17 +133,13 @@ export default function WasteAnalysisPage() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tariffBanner, setTariffBanner] = useState<string | null>(null);
-  const [thresholdBlockingMsg, setThresholdBlockingMsg] = useState<string | null>(null);
-  const [validatingThresholds, setValidatingThresholds] = useState(false);
+  const [thresholdBlockingMsg] = useState<string | null>(
+    "Missing threshold no longer blocks report generation. Overconsumption will be marked as skipped with reason."
+  );
+  const [resultData, setResultData] = useState<WasteResultPayload | null>(null);
   const autoDownloadedJobIds = useRef<Set<string>>(new Set());
 
   const selectedValid = useMemo(() => selected.filter(Boolean), [selected]);
-  const selectedDeviceNameById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const d of devices) m.set(d.id, d.name);
-    return m;
-  }, [devices]);
-
   async function loadHistory() {
     try {
       const h = await getWasteHistory(20, 0);
@@ -87,40 +165,20 @@ export default function WasteAnalysisPage() {
     bootstrap();
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function validateThresholds() {
-      setThresholdBlockingMsg(null);
-      if (scope !== "selected" || selectedValid.length === 0) return;
-      setValidatingThresholds(true);
-      try {
-        const checks = await Promise.all(
-          selectedValid.map(async (id) => {
-            const cfg = await getIdleConfig(id);
-            return { id, configured: cfg.configured };
-          })
-        );
-        if (cancelled) return;
-        const missing = checks.filter((x) => !x.configured).map((x) => x.id);
-        if (missing.length > 0) {
-          const labels = missing.map((id) => `${selectedDeviceNameById.get(id) || id} (${id})`);
-          setThresholdBlockingMsg(
-            `Set Idle Threshold in Parameter Configuration for: ${labels.join(", ")}`
-          );
-        }
-      } catch {
-        if (!cancelled) {
-          setThresholdBlockingMsg("Unable to validate idle threshold configuration right now.");
-        }
-      } finally {
-        if (!cancelled) setValidatingThresholds(false);
-      }
+  const onDownload = useCallback(async (id: string) => {
+    try {
+      const d = await getWasteDownload(id);
+      const link = document.createElement("a");
+      link.href = d.download_url;
+      link.target = "_self";
+      link.rel = "noopener noreferrer";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch {
+      setError("Failed to fetch download URL");
     }
-    validateThresholds();
-    return () => {
-      cancelled = true;
-    };
-  }, [scope, selectedValid, selectedDeviceNameById]);
+  }, []);
 
   useEffect(() => {
     if (!jobId || !running) return;
@@ -141,14 +199,10 @@ export default function WasteAnalysisPage() {
       }
     }, 3000);
     return () => clearInterval(timer);
-  }, [jobId, running]);
+  }, [jobId, running, onDownload]);
 
   async function onRun() {
     setError(null);
-    if (thresholdBlockingMsg) {
-      setError(thresholdBlockingMsg);
-      return;
-    }
     if (scope === "selected" && selectedValid.length === 0) {
       setError("Select at least one device for selected scope.");
       return;
@@ -180,26 +234,10 @@ export default function WasteAnalysisPage() {
     }
   }
 
-  async function onDownload(id: string) {
-    try {
-      const d = await getWasteDownload(id);
-      const link = document.createElement("a");
-      link.href = d.download_url;
-      link.target = "_self";
-      link.rel = "noopener noreferrer";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch {
-      setError("Failed to fetch download URL");
-    }
-  }
-
   async function onViewResult(id: string) {
     try {
       const result = await getWasteResult(id);
-      console.log("waste-result", result);
-      alert("Result payload printed in browser console.");
+      setResultData((result || null) as WasteResultPayload | null);
     } catch {
       setError("Failed to load result");
     }
@@ -296,10 +334,10 @@ export default function WasteAnalysisPage() {
 
         <button
           onClick={onRun}
-          disabled={running || Boolean(thresholdBlockingMsg) || validatingThresholds}
+          disabled={running}
           className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:bg-blue-300"
         >
-          {running ? "Generating report..." : validatingThresholds ? "Validating configuration..." : "Run Wastage Analysis"}
+          {running ? "Generating report..." : "Run Wastage Analysis"}
         </button>
 
         {status && (
@@ -359,6 +397,54 @@ export default function WasteAnalysisPage() {
           </div>
         )}
       </div>
+
+      {resultData && (
+        <div className="bg-white rounded-xl border p-5 space-y-4">
+          <h2 className="text-lg font-semibold text-gray-900">Result Breakdown</h2>
+          <div className="text-sm text-gray-600">
+            Total Waste Cost: {resultData.total_waste_cost != null ? `₹${Number(resultData.total_waste_cost).toFixed(2)}` : "N/A"}
+          </div>
+          <div className="space-y-4">
+            {(resultData.device_summaries || []).map((device: WasteResultDevice) => (
+              <div key={device.device_id} className="border rounded-lg p-3">
+                <div className="font-medium text-gray-900 mb-2">{device.device_name || device.device_id}</div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-gray-500 border-b">
+                        <th className="py-2 pr-4">Category</th>
+                        <th className="py-2 pr-4">Duration</th>
+                        <th className="py-2 pr-4">Energy</th>
+                        <th className="py-2 pr-4">Cost</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <WastageRow
+                        label="Off-Hours Running"
+                        duration={device?.off_hours?.duration_sec ?? device?.offhours_duration_sec}
+                        kwh={device?.off_hours?.energy_kwh ?? device?.offhours_energy_kwh}
+                        cost={device?.off_hours?.cost ?? device?.offhours_cost}
+                        skippedReason={device?.off_hours?.skipped_reason ?? device?.offhours_skipped_reason}
+                        pfEstimated={Boolean(device?.off_hours?.pf_estimated ?? device?.offhours_pf_estimated)}
+                        configSource={device?.off_hours?.config_source}
+                      />
+                      <WastageRow
+                        label="Overconsumption"
+                        duration={device?.overconsumption?.duration_sec ?? device?.overconsumption_duration_sec}
+                        kwh={device?.overconsumption?.energy_kwh ?? device?.overconsumption_kwh}
+                        cost={device?.overconsumption?.cost ?? device?.overconsumption_cost}
+                        skippedReason={device?.overconsumption?.skipped_reason ?? device?.overconsumption_skipped_reason}
+                        pfEstimated={Boolean(device?.overconsumption?.pf_estimated ?? device?.overconsumption_pf_estimated)}
+                        configSource={device?.overconsumption?.config_source}
+                      />
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

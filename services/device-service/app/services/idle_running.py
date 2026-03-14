@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.device import Device, IdleRunningLog, TELEMETRY_TIMEOUT_SECONDS
+from app.models.device import Device, IdleRunningLog, WasteSiteConfig, TELEMETRY_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,79 @@ class IdleRunningService:
             "idle_current_threshold": float(device.idle_current_threshold),
             "configured": True,
         }
+
+    async def get_waste_config(self, device_id: str) -> dict[str, Any]:
+        device = await self._get_device(device_id)
+        if not device:
+            raise ValueError("Device not found")
+
+        return {
+            "device_id": device_id,
+            "overconsumption_current_threshold_a": (
+                float(device.overconsumption_current_threshold_a)
+                if device.overconsumption_current_threshold_a is not None
+                else None
+            ),
+            # Deprecated; kept for backward compatibility.
+            "unoccupied_weekday_start_time": None,
+            "unoccupied_weekday_end_time": None,
+            "unoccupied_weekend_start_time": None,
+            "unoccupied_weekend_end_time": None,
+            "has_device_override": False,
+        }
+
+    async def set_waste_config(
+        self,
+        device_id: str,
+        overconsumption_current_threshold_a: Optional[float],
+        unoccupied_weekday_start_time: Optional[str],
+        unoccupied_weekday_end_time: Optional[str],
+        unoccupied_weekend_start_time: Optional[str],
+        unoccupied_weekend_end_time: Optional[str],
+    ) -> dict[str, Any]:
+        device = await self._get_device(device_id)
+        if not device:
+            raise ValueError("Device not found")
+
+        device.overconsumption_current_threshold_a = (
+            Decimal(str(round(float(overconsumption_current_threshold_a), 4)))
+            if overconsumption_current_threshold_a is not None
+            else None
+        )
+        # Deprecated fields are accepted but ignored in runtime logic.
+        device.unoccupied_weekday_start_time = None
+        device.unoccupied_weekday_end_time = None
+        device.unoccupied_weekend_start_time = None
+        device.unoccupied_weekend_end_time = None
+
+        await self._session.flush()
+        await self._session.commit()
+        return await self.get_waste_config(device_id)
+
+    async def get_site_waste_config(self, tenant_id: Optional[str] = None) -> dict[str, Any]:
+        return {
+            "tenant_id": tenant_id,
+            # Deprecated and intentionally disabled by policy.
+            "default_unoccupied_weekday_start_time": None,
+            "default_unoccupied_weekday_end_time": None,
+            "default_unoccupied_weekend_start_time": None,
+            "default_unoccupied_weekend_end_time": None,
+            "timezone": "Asia/Kolkata",
+            "configured": False,
+        }
+
+    async def set_site_waste_config(
+        self,
+        default_unoccupied_weekday_start_time: str,
+        default_unoccupied_weekday_end_time: str,
+        default_unoccupied_weekend_start_time: str,
+        default_unoccupied_weekend_end_time: str,
+        timezone_name: Optional[str],
+        updated_by: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        # Deprecated endpoint: accept payload for compatibility, but keep feature disabled.
+        return await self.get_site_waste_config(tenant_id)
 
     async def get_current_state(self, device_id: str) -> dict[str, Any]:
         device = await self._get_device(device_id)

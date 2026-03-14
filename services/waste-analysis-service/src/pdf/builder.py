@@ -4,7 +4,9 @@ from zoneinfo import ZoneInfo
 from jinja2 import Template
 from weasyprint import HTML
 
+from src.config import settings
 from src.pdf import charts
+from src.pdf.formatting import duration_label
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -26,11 +28,39 @@ def _to_ist(value) -> str:
 
 def generate_waste_pdf(payload: dict) -> bytes:
     devices = payload.get("device_summaries", [])
+    max_devices = max(1, int(settings.WASTE_PDF_MAX_DEVICES))
+
+    def _waste_cost(d: dict) -> float:
+        return float(
+            (d.get("idle_cost") or 0.0)
+            + (d.get("offhours_cost") or 0.0)
+            + (d.get("overconsumption_cost") or 0.0)
+        )
+
+    if len(devices) > max_devices:
+        render_devices = sorted(devices, key=_waste_cost, reverse=True)[:max_devices]
+        payload["pdf_omitted_devices"] = len(devices) - max_devices
+    else:
+        render_devices = devices
+        payload["pdf_omitted_devices"] = 0
+
+    payload["pdf_devices"] = render_devices
+    for d in payload["pdf_devices"]:
+        d["offhours_duration_label"] = duration_label(d.get("offhours_duration_sec"))
+        d["overconsumption_duration_label"] = duration_label(d.get("overconsumption_duration_sec"))
+    payload["pdf_any_pf_estimated"] = any(
+        bool(d.get("pf_estimated"))
+        or bool(d.get("offhours_pf_estimated"))
+        or bool(d.get("overconsumption_pf_estimated"))
+        for d in render_devices
+    )
     payload["generated_at"] = _to_ist(datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")) )
     payload["charts"] = {
-        "idle_cost": charts.idle_cost_bar(devices),
-        "standby": charts.standby_bar(devices),
-        "energy": charts.total_energy_bar(devices),
+        "idle_cost": charts.idle_cost_bar(render_devices),
+        "standby": charts.standby_bar(render_devices),
+        "offhours_cost": charts.offhours_cost_bar(render_devices),
+        "overconsumption_cost": charts.overconsumption_cost_bar(render_devices),
+        "energy": charts.total_energy_bar(render_devices),
     }
     html = Template(_template()).render(**payload)
     return HTML(string=html).write_pdf()
@@ -88,7 +118,7 @@ th { background:#f8fafc; text-align:left; }
   <h2>Idle Running Analysis</h2>
   <table>
     <tr><th>Device</th><th>Idle Time</th><th>Idle Energy (kWh)</th><th>Idle Cost</th><th>Data Quality</th></tr>
-    {% for d in device_summaries %}
+    {% for d in pdf_devices %}
     <tr>
       <td>{{ d.device_name }}</td>
       <td>{{ d.idle_duration_label }}</td>
@@ -103,9 +133,12 @@ th { background:#f8fafc; text-align:left; }
 
 <div class=\"section\">
   <h2>Standby Energy Loss</h2>
+  <div class=\"warn\" style=\"background:#eff6ff;border-left-color:#2563eb;color:#1e3a8a\">
+    Standby is diagnostic and is excluded from Total Waste Cost aggregation.
+  </div>
   <table>
     <tr><th>Device</th><th>Avg Standby Power (kW)</th><th>Standby Energy (kWh)</th><th>Standby Cost</th></tr>
-    {% for d in device_summaries %}
+    {% for d in pdf_devices %}
     <tr>
       <td>{{ d.device_name }}</td>
       <td>{{ d.standby_power_kw if d.standby_power_kw is not none else 'N/A' }}</td>
@@ -117,11 +150,51 @@ th { background:#f8fafc; text-align:left; }
   {% if charts.standby %}<div class=\"chart\"><img src=\"{{ charts.standby }}\"/></div>{% endif %}
 </div>
 
+<div class=\"section\">
+  <h2>Off-Hours Running Analysis</h2>
+  {% if pdf_omitted_devices > 0 %}
+  <div class=\"warn\" style=\"background:#eff6ff;border-left-color:#2563eb;color:#1e3a8a\">
+    Showing top {{ pdf_devices|length }} devices by waste cost. {{ pdf_omitted_devices }} additional devices are available in JSON export.
+  </div>
+  {% endif %}
+  <table>
+    <tr><th>Device</th><th>Duration</th><th>Energy</th><th>Cost / Note</th></tr>
+    {% for d in pdf_devices %}
+    <tr>
+      <td>{{ d.device_name }}{% if d.offhours_pf_estimated %}*{% endif %}</td>
+      <td>{{ d.offhours_duration_label }}</td>
+      <td>{% if d.offhours_skipped_reason %}—{% elif d.offhours_energy_kwh is not none %}{{ d.offhours_energy_kwh }} kWh{% else %}—{% endif %}</td>
+      <td>{% if d.offhours_skipped_reason %}{{ d.offhours_skipped_reason }}{% elif d.offhours_cost is not none %}{{ currency }} {{ d.offhours_cost }}{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if charts.offhours_cost %}<div class=\"chart\"><img src=\"{{ charts.offhours_cost }}\"/></div>{% endif %}
+</div>
+
+<div class=\"section\">
+  <h2>Overconsumption Analysis</h2>
+  <table>
+    <tr><th>Device</th><th>Duration</th><th>Energy</th><th>Cost / Note</th></tr>
+    {% for d in pdf_devices %}
+    <tr>
+      <td>{{ d.device_name }}{% if d.overconsumption_pf_estimated %}*{% endif %}</td>
+      <td>{{ d.overconsumption_duration_label }}</td>
+      <td>{% if d.overconsumption_skipped_reason %}—{% elif d.overconsumption_kwh is not none %}{{ d.overconsumption_kwh }} kWh{% else %}—{% endif %}</td>
+      <td>{% if d.overconsumption_skipped_reason %}{{ d.overconsumption_skipped_reason }}{% elif d.overconsumption_cost is not none %}{{ currency }} {{ d.overconsumption_cost }}{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if charts.overconsumption_cost %}<div class=\"chart\"><img src=\"{{ charts.overconsumption_cost }}\"/></div>{% endif %}
+  {% if pdf_any_pf_estimated %}
+  <div class=\"warn\">* Power factor estimated at 0.85 for one or more category calculations.</div>
+  {% endif %}
+</div>
+
 <div class=\"section page-break\">
   <h2>Total Consumption by Device</h2>
   <table>
     <tr><th>Device</th><th>Total kWh</th><th>Total Cost</th><th>Method</th><th>PF Estimated</th></tr>
-    {% for d in device_summaries %}
+    {% for d in pdf_devices %}
     <tr>
       <td>{{ d.device_name }}</td>
       <td>{{ d.total_energy_kwh }}</td>

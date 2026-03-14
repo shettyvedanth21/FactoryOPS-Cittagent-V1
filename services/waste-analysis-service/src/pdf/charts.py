@@ -136,3 +136,71 @@ def standby_bar(rows: list[dict]) -> str | None:
         )
     fig.tight_layout(pad=0.6)
     return _fig_to_data_uri(fig)
+
+
+def offhours_cost_bar(rows: list[dict]) -> str | None:
+    if not rows:
+        return None
+    labels = [_truncate(r.get("device_name") or r.get("device_id") or "Unknown") for r in rows]
+    vals = [float(r.get("offhours_cost") or 0.0) for r in rows]
+    if not any(vals):
+        return None
+    h = min(3.2, max(2.0, 1.45 + 0.43 * len(labels)))
+    fig, ax = plt.subplots(figsize=(7.0, h))
+    bars = ax.barh(labels, vals, color="#0ea5e9", height=0.48, edgecolor="#0284c7")
+    _compact_style(ax)
+    ax.set_xlabel("Off-Hours Cost", fontsize=8, color="#475569")
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.xaxis.grid(True)
+    ax.yaxis.grid(False)
+    ax.invert_yaxis()
+    max_val = max(vals) if vals else 0
+    ax.set_xlim(0, max_val * 1.18 if max_val > 0 else 1)
+    pad = _value_label_padding(max_val)
+    for b, v in zip(bars, vals):
+        ax.text(
+            b.get_width() + pad,
+            b.get_y() + (b.get_height() / 2),
+            f"₹{v:.2f}",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color="#0c4a6e",
+            fontweight="bold",
+        )
+    fig.tight_layout(pad=0.6)
+    return _fig_to_data_uri(fig)
+
+
+def overconsumption_cost_bar(rows: list[dict]) -> str | None:
+    if not rows:
+        return None
+    labels = [_truncate(r.get("device_name") or r.get("device_id") or "Unknown") for r in rows]
+    vals = [float(r.get("overconsumption_cost") or 0.0) for r in rows]
+    if not any(vals):
+        return None
+    h = min(3.2, max(2.0, 1.45 + 0.43 * len(labels)))
+    fig, ax = plt.subplots(figsize=(7.0, h))
+    bars = ax.barh(labels, vals, color="#ef4444", height=0.48, edgecolor="#dc2626")
+    _compact_style(ax)
+    ax.set_xlabel("Overconsumption Cost", fontsize=8, color="#475569")
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.xaxis.grid(True)
+    ax.yaxis.grid(False)
+    ax.invert_yaxis()
+    max_val = max(vals) if vals else 0
+    ax.set_xlim(0, max_val * 1.18 if max_val > 0 else 1)
+    pad = _value_label_padding(max_val)
+    for b, v in zip(bars, vals):
+        ax.text(
+            b.get_width() + pad,
+            b.get_y() + (b.get_height() / 2),
+            f"₹{v:.2f}",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color="#7f1d1d",
+            fontweight="bold",
+        )
+    fig.tight_layout(pad=0.6)
+    return _fig_to_data_uri(fig)

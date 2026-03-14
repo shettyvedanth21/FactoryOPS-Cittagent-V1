@@ -86,6 +86,21 @@ class WasteDeviceSummary(Base):
 
     offhours_energy_kwh = Column(Float, nullable=True)
     offhours_cost = Column(Float, nullable=True)
+    offhours_duration_sec = Column(Integer, nullable=True)
+    offhours_skipped_reason = Column(String(100), nullable=True)
+    offhours_pf_estimated = Column(Boolean, nullable=False, default=False)
+
+    overconsumption_duration_sec = Column(Integer, nullable=True)
+    overconsumption_kwh = Column(Float, nullable=True)
+    overconsumption_cost = Column(Float, nullable=True)
+    overconsumption_skipped_reason = Column(String(100), nullable=True)
+    overconsumption_pf_estimated = Column(Boolean, nullable=False, default=False)
+
+    unoccupied_duration_sec = Column(Integer, nullable=True)
+    unoccupied_energy_kwh = Column(Float, nullable=True)
+    unoccupied_cost = Column(Float, nullable=True)
+    unoccupied_skipped_reason = Column(String(100), nullable=True)
+    unoccupied_pf_estimated = Column(Boolean, nullable=False, default=False)
 
     data_quality = Column(String(20), nullable=True)
     energy_quality = Column(String(20), nullable=True)

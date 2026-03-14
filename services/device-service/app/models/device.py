@@ -91,6 +91,14 @@ class Device(Base):
         Numeric(10, 4),
         nullable=True,
     )
+    overconsumption_current_threshold_a: Mapped[Optional[float]] = mapped_column(
+        Numeric(10, 4),
+        nullable=True,
+    )
+    unoccupied_weekday_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    unoccupied_weekday_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    unoccupied_weekend_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    unoccupied_weekend_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     
     # Legacy status field - DEPRECATED
     # This field is kept for backward compatibility only.
@@ -520,3 +528,33 @@ class IdleRunningLog(Base):
 
     def __repr__(self) -> str:
         return f"<IdleRunningLog(device_id={self.device_id}, period_start={self.period_start})>"
+
+
+class WasteSiteConfig(Base):
+    """Factory/site-level defaults for waste analysis windows."""
+
+    __tablename__ = "waste_site_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    default_unoccupied_weekday_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    default_unoccupied_weekday_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    default_unoccupied_weekend_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    default_unoccupied_weekend_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    timezone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_waste_site_config_tenant"),
+    )

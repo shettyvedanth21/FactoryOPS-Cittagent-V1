@@ -258,7 +258,7 @@
 
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import pandas as pd
@@ -267,12 +267,14 @@ from sqlalchemy import select
 
 from src.config.settings import get_settings
 from src.infrastructure.database import async_session_maker
+from src.infrastructure.s3_client import S3Client
 from src.models.database import AccuracyEvaluation
 from src.models.schemas import AnalyticsRequest, AnalyticsType, JobStatus
 from src.services.analytics.ensemble.anomaly_ensemble import AnomalyEnsemble
 from src.services.analytics.ensemble.failure_ensemble import FailureEnsemble
 from src.services.analytics.forecasting import ForecastingPipeline
 from src.services.dataset_service import DatasetService
+from src.services.readiness_orchestrator import dataset_window_from_key, ensure_device_ready
 from src.services.result_formatter import ResultFormatter
 from src.services.result_repository import ResultRepository
 from src.utils.exceptions import AnalyticsError
@@ -325,6 +327,7 @@ class JobRunner:
         start_clock = time.time()
         params = request.parameters or {}
         settings = get_settings()
+        resolved_request = request
 
         self._logger.info(
             "job_started",
@@ -344,14 +347,44 @@ class JobRunner:
                 job_id, 10.0, "Loading dataset"
             )
 
+            if (
+                not request.dataset_key
+                and request.start_time
+                and request.end_time
+                and request.analysis_type in {AnalyticsType.ANOMALY, AnalyticsType.PREDICTION}
+            ):
+                await self._result_repo.update_job_progress(
+                    job_id, 15.0, "Preparing exact-range dataset"
+                )
+                s3_client = S3Client()
+                ready_device_id, dataset_key, readiness_meta = await ensure_device_ready(
+                    s3_client=s3_client,
+                    dataset_service=self._dataset_service,
+                    device_id=request.device_id,
+                    start_time=request.start_time,
+                    end_time=request.end_time,
+                )
+                if not dataset_key:
+                    reason = str((readiness_meta or {}).get("reason") or "dataset_not_ready")
+                    code = "DATASET_NOT_READY_TIMEOUT" if reason == "export_timeout" else "DATASET_NOT_READY"
+                    raise AnalyticsError(
+                        f"{code}: readiness failed for device={ready_device_id}, "
+                        f"reason={reason}, export_attempted={bool((readiness_meta or {}).get('export_attempted', False))}, "
+                        f"wait_seconds={float((readiness_meta or {}).get('wait_seconds', 0.0))}"
+                    )
+                resolved_request = request.model_copy(update={"dataset_key": dataset_key})
+                await self._result_repo.update_job_progress(
+                    job_id, 20.0, "Running analysis"
+                )
+
             # -------------------------------------------------------
             # Dataset loading
             # -------------------------------------------------------
             df = await self._dataset_service.load_dataset(
-                device_id=request.device_id,
-                start_time=request.start_time,
-                end_time=request.end_time,
-                s3_key=getattr(request, "dataset_key", None),
+                device_id=resolved_request.device_id,
+                start_time=resolved_request.start_time,
+                end_time=resolved_request.end_time,
+                s3_key=getattr(resolved_request, "dataset_key", None),
             )
 
             await self._result_repo.update_job_progress(
@@ -443,7 +476,7 @@ class JobRunner:
                 )
 
                 model = pipeline.train(
-                    train_df, request.model_name, params
+                    train_df, resolved_request.model_name, params
                 )
 
                 await self._result_repo.update_job_progress(
@@ -472,6 +505,25 @@ class JobRunner:
                 self._attach_failure_points(results, df)
 
             if settings.ml_formatted_results_enabled:
+                requested_start = (
+                    (
+                        resolved_request.start_time.astimezone(timezone.utc)
+                        if resolved_request.start_time.tzinfo
+                        else resolved_request.start_time.replace(tzinfo=timezone.utc)
+                    ).isoformat()
+                    if resolved_request.start_time
+                    else None
+                )
+                requested_end = (
+                    (
+                        resolved_request.end_time.astimezone(timezone.utc)
+                        if resolved_request.end_time.tzinfo
+                        else resolved_request.end_time.replace(tzinfo=timezone.utc)
+                    ).isoformat()
+                    if resolved_request.end_time
+                    else None
+                )
+                dataset_window = dataset_window_from_key(getattr(resolved_request, "dataset_key", None))
                 formatter = ResultFormatter()
                 if request.analysis_type == AnalyticsType.ANOMALY:
                     results["formatted"] = formatter.format_anomaly_results(
@@ -486,6 +538,8 @@ class JobRunner:
                             "fallback_mode": results.get("fallback_mode", False),
                             "days_available": results.get("days_available", params.get("lookback_days", 7)),
                             "data_points_analyzed": len(results.get("is_anomaly", [])),
+                            "requested_range": {"start_time": requested_start, "end_time": requested_end},
+                            "dataset_range": dataset_window,
                         },
                         ensemble=results.get("ensemble"),
                         reasoning=results.get("reasoning"),
@@ -506,6 +560,8 @@ class JobRunner:
                             "fallback_mode": results.get("fallback_mode", False),
                             "data_points_analyzed": len(results.get("failure_probability", [])),
                             "sensitivity": params.get("sensitivity", "medium"),
+                            "requested_range": {"start_time": requested_start, "end_time": requested_end},
+                            "dataset_range": dataset_window,
                         },
                         ensemble=results.get("ensemble"),
                         time_to_failure=results.get("time_to_failure"),

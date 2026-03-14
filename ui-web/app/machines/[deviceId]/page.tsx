@@ -11,6 +11,8 @@ import {
   saveIdleConfig,
   getCurrentState,
   getIdleStats,
+  getDeviceWasteConfig,
+  saveDeviceWasteConfig,
   CurrentState,
   IdleStats,
   getShifts,
@@ -671,6 +673,9 @@ export default function MachineDashboardPage() {
   const [idleThresholdInput, setIdleThresholdInput] = useState<string>("");
   const [idleSaveMessage, setIdleSaveMessage] = useState<string>("");
   const [idleSaving, setIdleSaving] = useState(false);
+  const [overconsumptionThresholdInput, setOverconsumptionThresholdInput] = useState<string>("");
+  const [wasteConfigSaving, setWasteConfigSaving] = useState(false);
+  const [wasteConfigMessage, setWasteConfigMessage] = useState<string>("");
   const [widgetConfig, setWidgetConfig] = useState<DashboardWidgetConfig | null>(null);
   const [selectedWidgetFields, setSelectedWidgetFields] = useState<string[]>([]);
   const [widgetSaveMessage, setWidgetSaveMessage] = useState<string>("");
@@ -835,10 +840,24 @@ export default function MachineDashboardPage() {
     }
   };
 
+  const loadWasteConfig = async () => {
+    try {
+      const cfg = await getDeviceWasteConfig(deviceId);
+      setOverconsumptionThresholdInput(
+        cfg.overconsumption_current_threshold_a != null
+          ? String(cfg.overconsumption_current_threshold_a)
+          : ""
+      );
+    } catch (err) {
+      console.error("Failed to load waste config:", err);
+    }
+  };
+
   useEffect(() => {
     if (!deviceId) return;
     fetchData(true);
     loadIdleConfig();
+    loadWasteConfig();
     loadCurrentState();
     loadIdleStats();
     pollingInterval.current = setInterval(() => fetchData(false), 10000);
@@ -926,6 +945,32 @@ export default function MachineDashboardPage() {
       alert("Failed: " + (err as Error).message);
     } finally {
       setIdleSaving(false);
+    }
+  };
+
+  const handleSaveWasteConfig = async () => {
+    const hasThreshold = overconsumptionThresholdInput.trim().length > 0;
+    const thresholdParsed = hasThreshold ? Number(overconsumptionThresholdInput) : null;
+    if (hasThreshold && (!Number.isFinite(thresholdParsed) || Number(thresholdParsed) <= 0)) {
+      alert("Overconsumption threshold must be a positive number.");
+      return;
+    }
+    try {
+      setWasteConfigSaving(true);
+      setWasteConfigMessage("");
+      await saveDeviceWasteConfig(deviceId, {
+        overconsumption_current_threshold_a: hasThreshold ? Number(thresholdParsed) : null,
+        unoccupied_weekday_start_time: null,
+        unoccupied_weekday_end_time: null,
+        unoccupied_weekend_start_time: null,
+        unoccupied_weekend_end_time: null,
+      });
+      await loadWasteConfig();
+      setWasteConfigMessage("Waste configuration saved.");
+    } catch (err) {
+      alert("Failed: " + (err as Error).message);
+    } finally {
+      setWasteConfigSaving(false);
     }
   };
 
@@ -1560,6 +1605,48 @@ export default function MachineDashboardPage() {
                         No current parameter found in telemetry. Idle detection will remain unavailable until current data is received.
                       </p>
                     )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Waste Configuration</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <p className="text-sm text-slate-600">
+                    Configure dedicated overconsumption threshold.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Overconsumption Threshold (A)</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={overconsumptionThresholdInput}
+                        onChange={(e) => setOverconsumptionThresholdInput(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md"
+                        placeholder="Leave empty to skip category"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <Button onClick={handleSaveWasteConfig} disabled={wasteConfigSaving}>
+                      {wasteConfigSaving ? "Saving..." : "Save Waste Config"}
+                    </Button>
+                    {wasteConfigMessage && (
+                      <span className="text-sm text-emerald-700">{wasteConfigMessage}</span>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
+                    <p>
+                      Overconsumption uses this dedicated threshold and is independent of idle threshold.
+                    </p>
                   </div>
                 </div>
               </CardContent>

@@ -47,6 +47,14 @@ class IdleConfigRequest(BaseModel):
     idle_current_threshold: float = Field(..., gt=0)
 
 
+class DeviceWasteConfigRequest(BaseModel):
+    overconsumption_current_threshold_a: Optional[float] = Field(default=None, gt=0)
+    unoccupied_weekday_start_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    unoccupied_weekday_end_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    unoccupied_weekend_start_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    unoccupied_weekend_end_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+
+
 # =====================================================
 # Device Properties Endpoints (Dynamic Schema)
 # Must come BEFORE /{device_id} routes
@@ -1065,6 +1073,61 @@ async def get_current_state(
     service = IdleRunningService(db)
     try:
         data = await service.get_current_state(device_id)
+        return {"success": True, **data}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+
+
+@router.get(
+    "/{device_id}/waste-config",
+    response_model=dict,
+    responses={404: {"model": ErrorResponse, "description": "Device not found"}},
+)
+async def get_waste_config(
+    device_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.idle_running import IdleRunningService
+
+    service = IdleRunningService(db)
+    try:
+        data = await service.get_waste_config(device_id)
+        return {"success": True, **data}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"success": False, "message": f"Device '{device_id}' not found"},
+        )
+
+
+@router.put(
+    "/{device_id}/waste-config",
+    response_model=dict,
+    responses={
+        400: {"model": ErrorResponse, "description": "Validation error"},
+        404: {"model": ErrorResponse, "description": "Device not found"},
+    },
+)
+async def set_waste_config(
+    device_id: str,
+    payload: DeviceWasteConfigRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.idle_running import IdleRunningService
+
+    service = IdleRunningService(db)
+    try:
+        data = await service.set_waste_config(
+            device_id=device_id,
+            overconsumption_current_threshold_a=payload.overconsumption_current_threshold_a,
+            unoccupied_weekday_start_time=payload.unoccupied_weekday_start_time,
+            unoccupied_weekday_end_time=payload.unoccupied_weekday_end_time,
+            unoccupied_weekend_start_time=payload.unoccupied_weekend_start_time,
+            unoccupied_weekend_end_time=payload.unoccupied_weekend_end_time,
+        )
         return {"success": True, **data}
     except ValueError:
         raise HTTPException(

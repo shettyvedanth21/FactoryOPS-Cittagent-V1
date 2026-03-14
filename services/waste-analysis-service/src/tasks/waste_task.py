@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, time
 from uuid import uuid4
@@ -14,6 +15,7 @@ from src.services import compute_device_waste, summarize_insights
 from src.services.influx_reader import influx_reader
 from src.services.remote_clients import device_client, tariff_cache
 from src.storage.minio_client import minio_client
+from src.utils import clean_for_json
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,46 @@ def _duration_label(seconds: int) -> str:
 
 def _is_low_or_insufficient(quality: str | None) -> bool:
     return (quality or "").lower() in {"low", "insufficient"}
+
+
+def _to_db_summary(x: dict) -> dict:
+    return {
+        "device_id": x["device_id"],
+        "device_name": x["device_name"],
+        "data_source_type": x["data_source_type"],
+        "idle_duration_sec": x["idle_duration_sec"],
+        "idle_energy_kwh": x["idle_energy_kwh"],
+        "idle_cost": x["idle_cost"],
+        "standby_power_kw": x["standby_power_kw"],
+        "standby_energy_kwh": x["standby_energy_kwh"],
+        "standby_cost": x["standby_cost"],
+        "total_energy_kwh": x["total_energy_kwh"],
+        "total_cost": x["total_cost"],
+        "offhours_energy_kwh": x["offhours_energy_kwh"],
+        "offhours_cost": x["offhours_cost"],
+        "offhours_duration_sec": x.get("offhours_duration_sec"),
+        "offhours_skipped_reason": x.get("offhours_skipped_reason"),
+        "offhours_pf_estimated": x.get("offhours_pf_estimated", False),
+        "overconsumption_duration_sec": x.get("overconsumption_duration_sec"),
+        "overconsumption_kwh": x.get("overconsumption_kwh"),
+        "overconsumption_cost": x.get("overconsumption_cost"),
+        "overconsumption_skipped_reason": x.get("overconsumption_skipped_reason"),
+        "overconsumption_pf_estimated": x.get("overconsumption_pf_estimated", False),
+        "unoccupied_duration_sec": x.get("unoccupied_duration_sec"),
+        "unoccupied_energy_kwh": x.get("unoccupied_energy_kwh"),
+        "unoccupied_cost": x.get("unoccupied_cost"),
+        "unoccupied_skipped_reason": x.get("unoccupied_skipped_reason"),
+        "unoccupied_pf_estimated": x.get("unoccupied_pf_estimated", False),
+        "data_quality": x["data_quality"],
+        "energy_quality": x["energy_quality"],
+        "idle_quality": x["idle_quality"],
+        "standby_quality": x["standby_quality"],
+        "overall_quality": x["overall_quality"],
+        "idle_status": x["idle_status"],
+        "pf_estimated": x["pf_estimated"],
+        "warnings": x["warnings"],
+        "calculation_method": x["calculation_method"],
+    }
 
 
 async def _find_reporting_reference_kwh(
@@ -134,100 +176,61 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             quality_failures: list[dict] = []
             threshold_by_device: dict[str, float | None] = {}
             shifts_by_device: dict[str, list[dict]] = {}
-            missing_threshold_ids: list[str] = []
-            for d in devices:
+            overconsumption_threshold_by_device: dict[str, float | None] = {}
+            config_warnings: list[str] = []
+            skipped_devices: list[dict] = []
+
+            cfg_sem = asyncio.Semaphore(max(1, settings.WASTE_DEVICE_CONCURRENCY))
+
+            async def _load_device_config(
+                d: dict,
+            ) -> tuple[
+                str,
+                float | None,
+                list[dict],
+                float | None,
+            ]:
                 device_id = d.get("device_id")
                 if not device_id:
-                    continue
-                threshold = await device_client.get_idle_config(device_id)
-                threshold_by_device[device_id] = threshold
-                shifts_by_device[device_id] = await device_client.get_shift_config(device_id)
-                if threshold is None:
-                    missing_threshold_ids.append(device_id)
-                    quality_failures.append(
-                        {
-                            "device_id": device_id,
-                            "metric": "idle",
-                            "code": "IDLE_THRESHOLD_NOT_CONFIGURED",
-                            "message": f"Idle threshold not configured for {device_id}",
-                        }
+                    return "", None, [], None
+                async with cfg_sem:
+                    threshold, shifts, waste_cfg = await asyncio.gather(
+                        device_client.get_idle_config(device_id),
+                        device_client.get_shift_config(device_id),
+                        device_client.get_waste_config(device_id),
                     )
 
-            # Permanent fix:
-            # - Selected scope stays strict (explicit user intent).
-            # - All scope skips unconfigured devices and proceeds with valid subset.
-            skipped_devices: list[dict] = []
-            if settings.WASTE_STRICT_QUALITY_GATE and quality_failures and scope == "all":
-                filtered_devices: list[dict] = []
-                for d in devices:
-                    device_id = d.get("device_id")
-                    if device_id in missing_threshold_ids:
-                        skipped_devices.append(
-                            {
-                                "device_id": device_id,
-                                "reason": "IDLE_THRESHOLD_NOT_CONFIGURED",
-                            }
-                        )
-                    else:
-                        filtered_devices.append(d)
-                devices = filtered_devices
-
-                if not devices:
-                    await repo.update_job(
-                        job_id,
-                        status="failed",
-                        error_code="QUALITY_GATE_FAILED",
-                        progress_pct=100,
-                        stage="Quality gate failed",
-                        error_message="Quality gate failed: configure idle threshold for all selected devices",
-                        result_json={
-                            "job_id": job_id,
-                            "scope": scope,
-                            "start_date": start_date.isoformat(),
-                            "end_date": end_date.isoformat(),
-                            "granularity": granularity,
-                            "quality_gate_passed": False,
-                            "quality_failures": quality_failures,
-                            "skipped_devices": skipped_devices,
-                            "estimation_used": False,
-                            "device_summaries": [],
-                            "warnings": [f"{f['device_id']}: {f['message']}" for f in quality_failures],
-                        },
-                        completed_at=datetime.utcnow(),
-                    )
-                    return
-                # Missing-threshold devices were intentionally skipped in "all" scope.
-                # Keep quality gate failures for analyzed devices only.
-                quality_failures = [
-                    f for f in quality_failures if f.get("code") != "IDLE_THRESHOLD_NOT_CONFIGURED"
-                ]
-
-            if settings.WASTE_STRICT_QUALITY_GATE and quality_failures and scope != "all":
-                missing_list = ", ".join(sorted(missing_threshold_ids)) if missing_threshold_ids else "selected devices"
-                payload = {
-                    "job_id": job_id,
-                    "scope": scope,
-                    "start_date": start_date.isoformat(),
-                    "end_date": end_date.isoformat(),
-                    "granularity": granularity,
-                    "quality_gate_passed": False,
-                    "quality_failures": quality_failures,
-                    "skipped_devices": skipped_devices,
-                    "estimation_used": False,
-                    "device_summaries": [],
-                    "warnings": [f"{f['device_id']}: {f['message']}" for f in quality_failures],
-                }
-                await repo.update_job(
-                    job_id,
-                    status="failed",
-                    error_code="QUALITY_GATE_FAILED",
-                    progress_pct=100,
-                    stage="Quality gate failed",
-                    error_message=f"Quality gate failed: configure idle threshold for {missing_list}",
-                    result_json=payload,
-                    completed_at=datetime.utcnow(),
+                overconsumption_threshold = waste_cfg.get("overconsumption_current_threshold_a")
+                overconsumption_threshold = (
+                    float(overconsumption_threshold)
+                    if overconsumption_threshold is not None
+                    else None
                 )
-                return
+
+                return (
+                    str(device_id),
+                    threshold,
+                    shifts,
+                    overconsumption_threshold,
+                )
+
+            cfg_tasks = [asyncio.create_task(_load_device_config(d)) for d in devices]
+            for fut in asyncio.as_completed(cfg_tasks):
+                (
+                    device_id,
+                    threshold,
+                    shifts,
+                    overconsumption_threshold,
+                ) = await fut
+                if not device_id:
+                    continue
+                threshold_by_device[device_id] = threshold
+                shifts_by_device[device_id] = shifts
+                overconsumption_threshold_by_device[device_id] = overconsumption_threshold
+                if threshold is None:
+                    config_warnings.append(f"{device_id}: idle threshold not configured (idle category reduced)")
+                if overconsumption_threshold is None:
+                    config_warnings.append(f"{device_id}: overconsumption threshold not configured (category skipped)")
 
             tariff = await tariff_cache.get()
             await repo.update_job(job_id, progress_pct=10, stage="Fetching tariff configuration...")
@@ -236,38 +239,45 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             end_dt = datetime.combine(end_date, time.max)
 
             results = []
-            warnings: list[str] = []
-            for idx, d in enumerate(devices, start=1):
+            warnings: list[str] = list(config_warnings)
+            n_devices = max(1, len(devices))
+            dev_sem = asyncio.Semaphore(max(1, settings.WASTE_DEVICE_CONCURRENCY))
+
+            async def _process_device(d: dict):
                 device_id = d.get("device_id")
                 if not device_id:
-                    continue
+                    return None
                 device_name = d.get("device_name") or device_id
                 data_source_type = d.get("data_source_type") or "metered"
-
-                await repo.update_job(
-                    job_id,
-                    progress_pct=min(80, 10 + int((idx / max(1, len(devices))) * 65)),
-                    stage=f"Loading telemetry for {device_name}... ({idx} of {len(devices)})",
-                )
-
-                rows = await influx_reader.query_telemetry(
-                    device_id=device_id,
-                    start_dt=start_dt,
-                    end_dt=end_dt,
-                    fields=TELEMETRY_FIELDS,
-                )
+                async with dev_sem:
+                    rows = await influx_reader.query_telemetry(
+                        device_id=device_id,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        fields=TELEMETRY_FIELDS,
+                    )
                 threshold = threshold_by_device.get(device_id)
                 shifts = shifts_by_device.get(device_id, [])
-
+                overconsumption_threshold = overconsumption_threshold_by_device.get(device_id)
                 res = compute_device_waste(
                     device_id=device_id,
                     device_name=device_name,
                     data_source_type=str(data_source_type),
                     rows=rows,
                     threshold=threshold,
+                    overconsumption_threshold=overconsumption_threshold,
                     tariff_rate=tariff.rate,
                     shifts=shifts,
                 )
+                return device_name, device_id, res
+
+            proc_tasks = [asyncio.create_task(_process_device(d)) for d in devices]
+            processed = 0
+            for fut in asyncio.as_completed(proc_tasks):
+                out = await fut
+                if out is None:
+                    continue
+                device_name, device_id, res = out
                 results.append(res)
                 warnings.extend([f"{device_name}: {w}" for w in res.warnings])
                 if _is_low_or_insufficient(res.overall_quality):
@@ -279,21 +289,47 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                             "message": f"Device quality is {res.overall_quality}",
                         }
                     )
+                processed += 1
+                if processed == 1 or processed == n_devices or (processed % max(1, n_devices // 20) == 0):
+                    await repo.update_job(
+                        job_id,
+                        progress_pct=min(80, 10 + int((processed / n_devices) * 65)),
+                        stage=f"Loading telemetry and computing... ({processed} of {n_devices})",
+                    )
 
             total_idle_kwh = round(sum(r.idle_energy_kwh for r in results), 6)
             total_idle_seconds = sum(r.idle_duration_sec for r in results)
             total_energy_kwh = round(sum(r.total_energy_kwh for r in results), 6)
             total_energy_cost = None if tariff.rate is None else round(sum((r.total_cost or 0.0) for r in results), 2)
-            total_waste_cost = None if tariff.rate is None else round(sum((r.idle_cost or 0.0) for r in results), 2)
+            total_waste_cost = None if tariff.rate is None else round(
+                sum(
+                    (r.idle_cost or 0.0)
+                    + (r.offhours_cost or 0.0)
+                    + (r.overconsumption_cost or 0.0)
+                    for r in results
+                ),
+                2,
+            )
             worst_device = "N/A"
             if results:
-                worst = max(results, key=lambda x: x.idle_cost or 0.0)
+                worst = max(
+                    results,
+                    key=lambda x: (x.idle_cost or 0.0)
+                    + (x.offhours_cost or 0.0)
+                    + (x.overconsumption_cost or 0.0),
+                )
                 worst_device = worst.device_name
 
             insights = summarize_insights(results, tariff.currency)
 
             device_summaries = []
             for r in results:
+                device_total_waste_cost = round(
+                    (r.idle_cost or 0.0)
+                    + (r.offhours_cost or 0.0)
+                    + (r.overconsumption_cost or 0.0),
+                    2,
+                ) if tariff.rate is not None else None
                 device_summaries.append(
                     {
                         "device_id": r.device_id,
@@ -308,8 +344,51 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                         "standby_cost": r.standby_cost,
                         "total_energy_kwh": r.total_energy_kwh,
                         "total_cost": r.total_cost,
+                        "total_energy_cost": r.total_cost,
+                        "total_energy_cost_inr": r.total_cost,
+                        "total_waste_cost": device_total_waste_cost,
+                        "total_waste_cost_inr": device_total_waste_cost,
                         "offhours_energy_kwh": r.offhours_energy_kwh,
                         "offhours_cost": r.offhours_cost,
+                        "offhours_duration_sec": r.offhours_duration_sec,
+                        "offhours_skipped_reason": r.offhours_skipped_reason,
+                        "offhours_pf_estimated": r.offhours_pf_estimated,
+                        "overconsumption_duration_sec": r.overconsumption_duration_sec,
+                        "overconsumption_kwh": r.overconsumption_energy_kwh,
+                        "overconsumption_cost": r.overconsumption_cost,
+                        "overconsumption_skipped_reason": r.overconsumption_skipped_reason,
+                        "overconsumption_pf_estimated": r.overconsumption_pf_estimated,
+                        "unoccupied_duration_sec": r.unoccupied_duration_sec,
+                        "unoccupied_energy_kwh": r.unoccupied_energy_kwh,
+                        "unoccupied_cost": r.unoccupied_cost,
+                        "unoccupied_skipped_reason": r.unoccupied_skipped_reason,
+                        "unoccupied_pf_estimated": r.unoccupied_pf_estimated,
+                        "off_hours": {
+                            "duration_sec": r.offhours_duration_sec,
+                            "energy_kwh": r.offhours_energy_kwh,
+                            "cost": r.offhours_cost,
+                            "skipped_reason": r.offhours_skipped_reason,
+                            "pf_estimated": r.offhours_pf_estimated,
+                            "config_source": "shift_config",
+                        },
+                        "overconsumption": {
+                            "duration_sec": r.overconsumption_duration_sec,
+                            "energy_kwh": r.overconsumption_energy_kwh,
+                            "cost": r.overconsumption_cost,
+                            "skipped_reason": r.overconsumption_skipped_reason,
+                            "pf_estimated": r.overconsumption_pf_estimated,
+                            "config_source": r.overconsumption_config_source,
+                            "config_used": r.overconsumption_config_used,
+                        },
+                        "unoccupied_running": {
+                            "duration_sec": r.unoccupied_duration_sec,
+                            "energy_kwh": r.unoccupied_energy_kwh,
+                            "cost": r.unoccupied_cost,
+                            "skipped_reason": r.unoccupied_skipped_reason,
+                            "pf_estimated": r.unoccupied_pf_estimated,
+                            "config_source": r.unoccupied_config_source,
+                            "config_used": r.unoccupied_config_used,
+                        },
                         "data_quality": r.data_quality,
                         "energy_quality": r.energy_quality,
                         "idle_quality": r.idle_quality,
@@ -342,7 +421,12 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                 "total_idle_label": _duration_label(total_idle_seconds),
                 "total_energy_kwh": total_energy_kwh,
                 "total_energy_cost": total_energy_cost,
+                "total_energy_cost_inr": total_energy_cost,
                 "total_waste_cost": total_waste_cost,
+                "total_waste_cost_inr": total_waste_cost,
+                "total_idle_cost_inr": None if tariff.rate is None else round(sum((r.idle_cost or 0.0) for r in results), 2),
+                "offhours_total_cost_inr": None if tariff.rate is None else round(sum((r.offhours_cost or 0.0) for r in results), 2),
+                "overconsumption_total_cost_inr": None if tariff.rate is None else round(sum((r.overconsumption_cost or 0.0) for r in results), 2),
                 "worst_device": worst_device,
                 "device_summaries": device_summaries,
                 "warnings": sorted(set(warnings)),
@@ -351,11 +435,15 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                 "quality_failures": quality_failures,
                 "skipped_devices": skipped_devices,
                 "estimation_used": False,
+                "calculation_version": "waste_v2_exclusive",
+                "aggregation_policy": "mutually_exclusive",
+                "diagnostic_only_categories": ["standby"],
             }
-            if skipped_devices:
-                result_payload["warnings"].append(
-                    f"Skipped {len(skipped_devices)} device(s) without idle threshold in all-devices scope"
-                )
+
+            invariant_checks = {"waste_le_total_energy": True}
+            if total_waste_cost is not None and total_energy_cost is not None:
+                invariant_checks["waste_le_total_energy"] = total_waste_cost <= (total_energy_cost + 0.01)
+            result_payload["invariant_checks"] = invariant_checks
 
             try:
                 ref_kwh = await _find_reporting_reference_kwh(scope, selected, start_date, end_date)
@@ -381,36 +469,13 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             except Exception:
                 result_payload["parity_check"] = {"checked": False}
 
+            db_summaries = [_to_db_summary(x) for x in device_summaries]
+
             if settings.WASTE_STRICT_QUALITY_GATE and not quality_gate_passed:
-                await repo.replace_device_summaries(
+                await repo.replace_device_summaries_chunked(
                     job_id,
-                    summaries=[
-                        {
-                            "device_id": x["device_id"],
-                            "device_name": x["device_name"],
-                            "data_source_type": x["data_source_type"],
-                            "idle_duration_sec": x["idle_duration_sec"],
-                            "idle_energy_kwh": x["idle_energy_kwh"],
-                            "idle_cost": x["idle_cost"],
-                            "standby_power_kw": x["standby_power_kw"],
-                            "standby_energy_kwh": x["standby_energy_kwh"],
-                            "standby_cost": x["standby_cost"],
-                            "total_energy_kwh": x["total_energy_kwh"],
-                            "total_cost": x["total_cost"],
-                            "offhours_energy_kwh": x["offhours_energy_kwh"],
-                            "offhours_cost": x["offhours_cost"],
-                            "data_quality": x["data_quality"],
-                            "energy_quality": x["energy_quality"],
-                            "idle_quality": x["idle_quality"],
-                            "standby_quality": x["standby_quality"],
-                            "overall_quality": x["overall_quality"],
-                            "idle_status": x["idle_status"],
-                            "pf_estimated": x["pf_estimated"],
-                            "warnings": x["warnings"],
-                            "calculation_method": x["calculation_method"],
-                        }
-                        for x in device_summaries
-                    ],
+                    summaries=db_summaries,
+                    batch_size=settings.WASTE_DB_BATCH_SIZE,
                 )
                 await repo.update_job(
                     job_id,
@@ -419,7 +484,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                     progress_pct=100,
                     stage="Quality gate failed",
                     error_message="Quality gate failed: one or more devices are low/insufficient quality",
-                    result_json=result_payload,
+                    result_json=clean_for_json(result_payload),
                     completed_at=datetime.utcnow(),
                 )
                 return
@@ -430,35 +495,10 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
             minio_client.upload_pdf(pdf_bytes, s3_key)
             download_url = minio_client.get_presigned_url(s3_key)
 
-            await repo.replace_device_summaries(
+            await repo.replace_device_summaries_chunked(
                 job_id,
-                summaries=[
-                    {
-                        "device_id": x["device_id"],
-                        "device_name": x["device_name"],
-                        "data_source_type": x["data_source_type"],
-                        "idle_duration_sec": x["idle_duration_sec"],
-                        "idle_energy_kwh": x["idle_energy_kwh"],
-                        "idle_cost": x["idle_cost"],
-                        "standby_power_kw": x["standby_power_kw"],
-                        "standby_energy_kwh": x["standby_energy_kwh"],
-                        "standby_cost": x["standby_cost"],
-                        "total_energy_kwh": x["total_energy_kwh"],
-                        "total_cost": x["total_cost"],
-                        "offhours_energy_kwh": x["offhours_energy_kwh"],
-                        "offhours_cost": x["offhours_cost"],
-                        "data_quality": x["data_quality"],
-                        "energy_quality": x["energy_quality"],
-                        "idle_quality": x["idle_quality"],
-                        "standby_quality": x["standby_quality"],
-                        "overall_quality": x["overall_quality"],
-                        "idle_status": x["idle_status"],
-                        "pf_estimated": x["pf_estimated"],
-                        "warnings": x["warnings"],
-                        "calculation_method": x["calculation_method"],
-                    }
-                    for x in device_summaries
-                ],
+                summaries=db_summaries,
+                batch_size=settings.WASTE_DB_BATCH_SIZE,
             )
 
             await repo.update_job(
@@ -466,7 +506,7 @@ async def run_waste_analysis(job_id: str, params: dict) -> None:
                 status="completed",
                 progress_pct=100,
                 stage="Complete ✓",
-                result_json=result_payload,
+                result_json=clean_for_json(result_payload),
                 s3_key=s3_key,
                 download_url=download_url,
                 tariff_rate_used=tariff.rate,

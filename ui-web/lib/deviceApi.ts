@@ -36,6 +36,16 @@ export interface IdleConfig {
   configured: boolean;
 }
 
+export interface DeviceWasteConfig {
+  device_id: string;
+  overconsumption_current_threshold_a: number | null;
+  unoccupied_weekday_start_time: string | null;
+  unoccupied_weekday_end_time: string | null;
+  unoccupied_weekend_start_time: string | null;
+  unoccupied_weekend_end_time: string | null;
+  has_device_override: boolean;
+}
+
 export interface CurrentState {
   device_id: string;
   state: DeviceLoadState;
@@ -206,6 +216,56 @@ export async function getIdleStats(deviceId: string): Promise<IdleStats> {
     data_source_type: json.data_source_type,
     tariff_cache: json.tariff_cache,
     tariff_stale: json.tariff_stale,
+  };
+}
+
+export async function getDeviceWasteConfig(deviceId: string): Promise<DeviceWasteConfig> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/waste-config`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(await readApiError(res));
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    overconsumption_current_threshold_a: json.overconsumption_current_threshold_a ?? null,
+    unoccupied_weekday_start_time: json.unoccupied_weekday_start_time ?? null,
+    unoccupied_weekday_end_time: json.unoccupied_weekday_end_time ?? null,
+    unoccupied_weekend_start_time: json.unoccupied_weekend_start_time ?? null,
+    unoccupied_weekend_end_time: json.unoccupied_weekend_end_time ?? null,
+    has_device_override: Boolean(json.has_device_override),
+  };
+}
+
+export async function saveDeviceWasteConfig(
+  deviceId: string,
+  payload: {
+    overconsumption_current_threshold_a: number | null;
+    unoccupied_weekday_start_time: string | null;
+    unoccupied_weekday_end_time: string | null;
+    unoccupied_weekend_start_time: string | null;
+    unoccupied_weekend_end_time: string | null;
+  }
+): Promise<DeviceWasteConfig> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/waste-config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new Error(await readApiError(res));
+  }
+  const json = await res.json();
+  return {
+    device_id: json.device_id,
+    overconsumption_current_threshold_a: json.overconsumption_current_threshold_a ?? null,
+    unoccupied_weekday_start_time: json.unoccupied_weekday_start_time ?? null,
+    unoccupied_weekday_end_time: json.unoccupied_weekday_end_time ?? null,
+    unoccupied_weekend_start_time: json.unoccupied_weekend_start_time ?? null,
+    unoccupied_weekend_end_time: json.unoccupied_weekend_end_time ?? null,
+    has_device_override: Boolean(json.has_device_override),
   };
 }
 

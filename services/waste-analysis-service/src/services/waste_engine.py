@@ -4,16 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
-import math
+from src.services.telemetry_normalizer import (
+    NormalizedInterval,
+    build_normalized_intervals,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
-
-
-CURRENT_ALIASES = ["current", "phase_current", "i_l1", "current_l1", "current_l2", "current_l3"]
-VOLTAGE_ALIASES = ["voltage", "voltage_l1", "v_l1", "voltage_l2", "v_l2", "voltage_l3", "v_l3"]
-PF_ALIASES = ["power_factor", "pf"]
-POWER_ALIASES = ["power", "active_power", "kw"]
-ENERGY_ALIASES = ["energy_kwh", "kwh", "energy"]
+DEFAULT_PF = 0.85
 
 
 @dataclass
@@ -31,6 +28,23 @@ class DeviceWasteResult:
     total_cost: Optional[float]
     offhours_energy_kwh: Optional[float]
     offhours_cost: Optional[float]
+    offhours_duration_sec: Optional[int]
+    offhours_skipped_reason: Optional[str]
+    offhours_pf_estimated: bool
+    overconsumption_duration_sec: Optional[int]
+    overconsumption_energy_kwh: Optional[float]
+    overconsumption_cost: Optional[float]
+    overconsumption_skipped_reason: Optional[str]
+    overconsumption_pf_estimated: bool
+    overconsumption_config_source: Optional[str]
+    overconsumption_config_used: Optional[dict[str, Any]]
+    unoccupied_duration_sec: Optional[int]
+    unoccupied_energy_kwh: Optional[float]
+    unoccupied_cost: Optional[float]
+    unoccupied_skipped_reason: Optional[str]
+    unoccupied_pf_estimated: bool
+    unoccupied_config_source: Optional[str]
+    unoccupied_config_used: Optional[dict[str, Any]]
     data_quality: str
     pf_estimated: bool
     warnings: list[str]
@@ -45,119 +59,7 @@ class DeviceWasteResult:
     normalization_applied: bool
 
 
-@dataclass
-class _Interval:
-    ts: datetime
-    duration_sec: float
-    current: Optional[float]
-    voltage: Optional[float]
-    power_kw: Optional[float]
-    pf: Optional[float]
-    energy_kwh: Optional[float]
-
-
-def _normalize_key(k: str) -> str:
-    return k.strip().lower().replace("-", "_")
-
-
-def _is_numeric_value(value: Any) -> bool:
-    if value is None:
-        return False
-    try:
-        f = float(value)
-        if math.isnan(f) or math.isinf(f):
-            return False
-        return True
-    except Exception:
-        return False
-
-
-def _find_field(row: dict[str, Any], aliases: list[str], contains_token: Optional[str] = None) -> Optional[str]:
-    norm = {_normalize_key(k): k for k in row.keys()}
-    for a in aliases:
-        if a in norm and _is_numeric_value(row.get(norm[a])):
-            return norm[a]
-    if contains_token:
-        for nk in sorted(norm.keys()):
-            ok = norm[nk]
-            if contains_token in nk and _is_numeric_value(row.get(ok)):
-                return ok
-    return None
-
-
-def _extract_current(row: dict[str, Any]) -> tuple[Optional[float], Optional[str]]:
-    phase_keys = []
-    for k in row.keys():
-        nk = _normalize_key(k)
-        if "current_l" in nk or nk.startswith("i_l"):
-            phase_keys.append(k)
-    if phase_keys:
-        vals = [float(row[k]) for k in phase_keys if _is_numeric_value(row.get(k))]
-        if vals:
-            return max(vals), ",".join(phase_keys)
-
-    key = _find_field(row, CURRENT_ALIASES, contains_token="current")
-    if key and _is_numeric_value(row.get(key)):
-        return float(row[key]), key
-    return None, None
-
-
-def _extract_voltage(row: dict[str, Any]) -> tuple[Optional[float], Optional[str]]:
-    phase_keys = []
-    for k in row.keys():
-        nk = _normalize_key(k)
-        if "voltage_l" in nk or nk.startswith("v_l"):
-            phase_keys.append(k)
-    if phase_keys:
-        vals = [float(row[k]) for k in phase_keys if _is_numeric_value(row.get(k))]
-        if vals:
-            return sum(vals) / len(vals), ",".join(phase_keys)
-
-    key = _find_field(row, VOLTAGE_ALIASES, contains_token="voltage")
-    if key and _is_numeric_value(row.get(key)):
-        return float(row[key]), key
-    return None, None
-
-
-def _extract_pf(row: dict[str, Any]) -> Optional[float]:
-    key = _find_field(row, PF_ALIASES, contains_token="power_factor")
-    if key and _is_numeric_value(row.get(key)):
-        return float(row[key])
-    return None
-
-
-def _extract_power_kw(row: dict[str, Any]) -> tuple[Optional[float], Optional[str], str, bool]:
-    key = _find_field(row, POWER_ALIASES)
-    if not key or not _is_numeric_value(row.get(key)):
-        return None, None, "unknown", False
-    val = float(row[key])
-    nk = _normalize_key(key)
-    if nk in {"power", "active_power"}:
-        return val / 1000.0, key, "W", True
-    if nk == "kw":
-        return val, key, "kW", False
-    return val, key, "unknown", False
-
-
-def _extract_energy_kwh(row: dict[str, Any]) -> Optional[float]:
-    key = _find_field(row, ENERGY_ALIASES, contains_token="energy")
-    if key and _is_numeric_value(row.get(key)):
-        return float(row[key])
-    return None
-
-
-def _safe_dt(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        return dt
-    except Exception:
-        return None
+_Interval = NormalizedInterval
 
 
 def detect_state(current: Optional[float], voltage: Optional[float], threshold: Optional[float]) -> str:
@@ -184,74 +86,51 @@ def _overall_quality(*qualities: str) -> str:
     return ranked[0] if ranked else "insufficient"
 
 
+def _interval_energy_kwh(interval: _Interval) -> tuple[Optional[float], bool]:
+    if interval.duration_sec <= 0:
+        return 0.0, False
+    duration_h = interval.duration_sec / 3600.0
+    if interval.power_kw is not None and interval.power_kw >= 0:
+        return max(0.0, interval.power_kw * duration_h), False
+    if interval.current_a is not None and interval.voltage_v is not None:
+        pf = interval.pf if interval.pf is not None else DEFAULT_PF
+        kw = (interval.current_a * interval.voltage_v * pf) / 1000.0
+        return max(0.0, kw * duration_h), interval.pf is None
+    return None, False
+
+
 def _calc_total_energy(intervals: list[_Interval]) -> tuple[float, str, bool, str, list[str]]:
     warnings: list[str] = []
+    total_kwh = 0.0
+    known_intervals = 0
+    power_intervals = 0
+    derived_intervals = 0
     pf_estimated = False
 
-    energy_values = [x.energy_kwh for x in intervals if x.energy_kwh is not None]
-    if len(energy_values) >= 2:
-        delta = max(0.0, energy_values[-1] - energy_values[0])
-        return round(delta, 6), "energy_delta", False, "high", warnings
+    for interval in intervals:
+        energy, est = _interval_energy_kwh(interval)
+        if energy is None:
+            continue
+        known_intervals += 1
+        pf_estimated = pf_estimated or est
+        if interval.power_kw is not None:
+            power_intervals += 1
+        else:
+            derived_intervals += 1
+        total_kwh += energy
 
-    has_power = any(x.power_kw is not None for x in intervals)
-    if has_power:
-        series = [(x.ts, float(x.power_kw)) for x in intervals if x.power_kw is not None]
-        total = 0.0
-        saw_zero_gap = False
-        saw_negative_gap = False
-        for idx in range(1, len(series)):
-            dt_sec = (series[idx][0] - series[idx - 1][0]).total_seconds()
-            if dt_sec < 0:
-                saw_negative_gap = True
-                continue
-            if dt_sec == 0:
-                saw_zero_gap = True
-                continue
-            dt_h = dt_sec / 3600.0
-            total += ((series[idx - 1][1] + series[idx][1]) / 2.0) * dt_h
-        if saw_negative_gap:
-            warnings.append("NON_MONOTONIC_TIMESTAMPS: non-monotonic samples skipped during integration")
-        if saw_zero_gap:
-            warnings.append("TIMESTAMP_GAP_SKIPPED: duplicate timestamp samples skipped during integration")
-        return round(max(0.0, total), 6), "power_integration", False, "medium", warnings
+    if known_intervals == 0:
+        warnings.append("Insufficient telemetry for energy calculation (need power or voltage+current)")
+        return 0.0, "insufficient", False, "insufficient", warnings
 
-    has_v_i = any(x.voltage is not None and x.current is not None for x in intervals)
-    if has_v_i:
-        series: list[tuple[datetime, float]] = []
-        total = 0.0
-        for x in intervals:
-            if x.current is None or x.voltage is None:
-                continue
-            pf = x.pf if x.pf is not None else 1.0
-            if x.pf is None:
-                pf_estimated = True
-            kw = (x.current * x.voltage * pf) / 1000.0
-            series.append((x.ts, kw))
+    if known_intervals < len([x for x in intervals if x.duration_sec > 0]):
+        warnings.append("ENERGY_PARTIAL_COVERAGE: some intervals missing telemetry and were skipped")
+    if pf_estimated:
+        warnings.append("Power factor missing for part/all telemetry; PF assumed as 0.85")
 
-        saw_zero_gap = False
-        saw_negative_gap = False
-        for idx in range(1, len(series)):
-            dt_sec = (series[idx][0] - series[idx - 1][0]).total_seconds()
-            if dt_sec < 0:
-                saw_negative_gap = True
-                continue
-            if dt_sec == 0:
-                saw_zero_gap = True
-                continue
-            dt_h = dt_sec / 3600.0
-            total += ((series[idx - 1][1] + series[idx][1]) / 2.0) * dt_h
-        if saw_negative_gap:
-            warnings.append("NON_MONOTONIC_TIMESTAMPS: non-monotonic samples skipped during integration")
-        if saw_zero_gap:
-            warnings.append("TIMESTAMP_GAP_SKIPPED: duplicate timestamp samples skipped during integration")
-
-        quality = "low" if pf_estimated else "medium"
-        if pf_estimated:
-            warnings.append("Power factor missing for part/all telemetry; PF assumed as 1.0")
-        return round(max(0.0, total), 6), "derived", pf_estimated, quality, warnings
-
-    warnings.append("Insufficient telemetry for energy calculation (need power or voltage+current)")
-    return 0.0, "insufficient", False, "insufficient", warnings
+    method = "interval_power" if power_intervals >= derived_intervals else "interval_derived"
+    quality = "medium" if power_intervals > 0 else "low"
+    return round(max(0.0, total_kwh), 6), method, pf_estimated, quality, warnings
 
 
 def _is_offhours(ts: datetime, shifts: list[dict[str, Any]]) -> bool:
@@ -300,6 +179,7 @@ def compute_device_waste(
     data_source_type: str,
     rows: list[dict[str, Any]],
     threshold: Optional[float],
+    overconsumption_threshold: Optional[float],
     tariff_rate: Optional[float],
     shifts: list[dict[str, Any]],
 ) -> DeviceWasteResult:
@@ -322,6 +202,23 @@ def compute_device_waste(
             total_cost=None,
             offhours_energy_kwh=None,
             offhours_cost=None,
+            offhours_duration_sec=None,
+            offhours_skipped_reason="No telemetry data",
+            offhours_pf_estimated=False,
+            overconsumption_duration_sec=None,
+            overconsumption_energy_kwh=None,
+            overconsumption_cost=None,
+            overconsumption_skipped_reason="No telemetry data",
+            overconsumption_pf_estimated=False,
+            overconsumption_config_source=None,
+            overconsumption_config_used=None,
+            unoccupied_duration_sec=None,
+            unoccupied_energy_kwh=None,
+            unoccupied_cost=None,
+            unoccupied_skipped_reason="No telemetry data",
+            unoccupied_pf_estimated=False,
+            unoccupied_config_source=None,
+            unoccupied_config_used=None,
             data_quality="insufficient",
             pf_estimated=False,
             warnings=["No telemetry data in selected range"],
@@ -336,133 +233,152 @@ def compute_device_waste(
             normalization_applied=normalization_applied,
         )
 
-    sorted_rows = sorted(rows, key=lambda x: _safe_dt(x.get("timestamp") or x.get("_time")) or datetime.min)
-    intervals: list[_Interval] = []
-    current_field_used: Optional[str] = None
-
-    saw_zero_gap = False
-    saw_negative_gap = False
-    for i, row in enumerate(sorted_rows):
-        ts = _safe_dt(row.get("timestamp") or row.get("_time"))
-        if ts is None:
-            continue
-
-        if i < len(sorted_rows) - 1:
-            n_ts = _safe_dt(sorted_rows[i + 1].get("timestamp") or sorted_rows[i + 1].get("_time"))
-            duration_sec = (n_ts - ts).total_seconds() if n_ts else 0.0
-            if duration_sec < 0:
-                saw_negative_gap = True
-                duration_sec = 0.0
-            elif duration_sec == 0:
-                saw_zero_gap = True
-        else:
-            duration_sec = 0.0
-
-        current, current_src = _extract_current(row)
-        voltage, _ = _extract_voltage(row)
-        pf = _extract_pf(row)
-        power_kw, power_src, p_unit_in, p_norm = _extract_power_kw(row)
-        energy_kwh = _extract_energy_kwh(row)
-        if current_field_used is None and current_src:
-            current_field_used = current_src
-        if power_src and power_unit_input == "unknown":
-            power_unit_input = p_unit_in
-            normalization_applied = p_norm
-
-        intervals.append(
-            _Interval(
-                ts=ts,
-                duration_sec=max(0.0, duration_sec),
-                current=current,
-                voltage=voltage,
-                power_kw=power_kw,
-                pf=pf,
-                energy_kwh=energy_kwh,
-            )
-        )
+    intervals, telemetry_meta = build_normalized_intervals(rows, max_gap_seconds=900.0)
+    current_field_used = telemetry_meta.get("current_field_used")
+    power_unit_input = telemetry_meta.get("power_unit_input") or power_unit_input
+    normalization_applied = bool(telemetry_meta.get("normalization_applied"))
 
     if current_field_used is None:
         warnings.append("No current parameter detected; idle/load precision reduced")
     if normalization_applied:
         warnings.append("POWER_UNIT_ASSUMED_WATTS: normalized power/active_power to kW")
-    if saw_negative_gap:
+    if telemetry_meta.get("saw_negative_gap"):
         warnings.append("NON_MONOTONIC_TIMESTAMPS: non-monotonic samples skipped during integration")
-    if saw_zero_gap:
+    if telemetry_meta.get("saw_zero_gap"):
         warnings.append("TIMESTAMP_GAP_SKIPPED: duplicate timestamp samples skipped during integration")
+    if telemetry_meta.get("saw_large_gap"):
+        warnings.append("LARGE_TIMESTAMP_GAP_SKIPPED: intervals larger than 15 minutes were skipped")
 
     total_energy_kwh, method, pf_estimated, energy_quality, method_warnings = _calc_total_energy(intervals)
     idle_status = "configured"
-
-    def _compute_idle_metrics(use_threshold: Optional[float]):
-        idle_duration = 0
-        idle_energy = 0.0
-        idle_samples: list[float] = []
-        offhours_energy = 0.0
-        pf_estimated_local = pf_estimated
-
-        for i in intervals:
-            if i.duration_sec <= 0:
-                continue
-            state = detect_state(i.current, i.voltage, use_threshold)
-            derived_power = i.power_kw
-            this_pf_estimated = False
-            if derived_power is None and i.current is not None and i.voltage is not None:
-                pfv = i.pf if i.pf is not None else 1.0
-                derived_power = (i.current * i.voltage * pfv) / 1000.0
-                this_pf_estimated = i.pf is None
-
-            if state == "idle":
-                idle_duration += int(i.duration_sec)
-                if derived_power is not None:
-                    idle_energy += derived_power * (i.duration_sec / 3600.0)
-                    idle_samples.append(derived_power)
-                    if this_pf_estimated:
-                        pf_estimated_local = True
-
-            if derived_power is not None and _is_offhours(i.ts, shifts):
-                offhours_energy += derived_power * (i.duration_sec / 3600.0)
-
-        return idle_duration, idle_energy, idle_samples, offhours_energy, pf_estimated_local
-
-    has_current_voltage = any(x.current is not None and x.voltage is not None for x in intervals)
-
+    has_current_voltage = any(x.current_a is not None and x.voltage_v is not None for x in intervals)
     if threshold is None:
         idle_status = "needs_configuration"
         warnings.append("IDLE_THRESHOLD_NOT_CONFIGURED: idle threshold is required for idle waste calculation")
-        idle_duration_sec = 0
-        idle_energy_kwh = 0.0
-        idle_kw_samples: list[float] = []
-        offhours_energy_kwh = 0.0
         idle_quality = "insufficient"
-        standby_quality = "insufficient"
     else:
-        idle_duration_sec, idle_energy_kwh, idle_kw_samples, offhours_energy_kwh, pf_estimated = _compute_idle_metrics(
-            threshold
-        )
         idle_quality = "high" if has_current_voltage else "insufficient"
         if not has_current_voltage:
             warnings.append("IDLE_TELEMETRY_MISSING: current/voltage telemetry required for idle detection")
-        if idle_duration_sec == 0:
-            idle_status = "not_detected"
-        standby_quality = "high" if idle_kw_samples or idle_status == "not_detected" else "insufficient"
+
+    over_skip_reason: Optional[str] = None
+    if overconsumption_threshold is None:
+        over_skip_reason = "Current threshold not configured for this device"
+
+    off_skip_reason: Optional[str] = None
+    if not shifts:
+        off_skip_reason = "Shift not configured for this device"
+
+    idle_duration_sec = 0
+    idle_energy_kwh = 0.0
+    idle_kw_samples: list[float] = []
+    offhours_duration_sec = 0 if off_skip_reason is None else None
+    offhours_energy_kwh = 0.0 if off_skip_reason is None else None
+    over_duration_sec = 0 if over_skip_reason is None else None
+    over_energy_kwh = 0.0 if over_skip_reason is None else None
+    off_pf_estimated = False
+    over_pf_estimated = False
+    category_warnings: list[str] = []
+
+    thr_idle = float(threshold) if threshold is not None else None
+    thr_over = float(overconsumption_threshold) if overconsumption_threshold is not None else None
+
+    for interval in intervals:
+        if interval.duration_sec <= 0:
+            continue
+
+        base_energy, base_pf_est = _interval_energy_kwh(interval)
+        pf_estimated = pf_estimated or base_pf_est
+        duration_h = interval.duration_sec / 3600.0
+        state = detect_state(interval.current_a, interval.voltage_v, thr_idle)
+        running = (interval.power_kw is not None and interval.power_kw > 0) or (
+            interval.current_a is not None and interval.current_a > (thr_idle or 0.0)
+        )
+
+        over_energy = 0.0
+        over_known = False
+        if thr_over is not None and interval.current_a is not None and interval.current_a > thr_over:
+            if over_duration_sec is not None:
+                over_duration_sec += int(interval.duration_sec)
+            excess_current = interval.current_a - thr_over
+            if interval.voltage_v is not None and interval.voltage_v > 0:
+                excess_kw = (excess_current * interval.voltage_v * DEFAULT_PF) / 1000.0
+                over_pf_estimated = True
+                over_known = True
+            elif interval.power_kw is not None and interval.power_kw > 0:
+                excess_kw = interval.power_kw * (excess_current / max(interval.current_a, 1e-9))
+                over_known = True
+            else:
+                category_warnings.append(
+                    "OVERCONSUMPTION: Current exceeded threshold but voltage/power unavailable for some intervals"
+                )
+                excess_kw = 0.0
+            if over_known:
+                over_energy = max(0.0, excess_kw * duration_h)
+                if base_energy is not None:
+                    over_energy = min(over_energy, base_energy)
+                if over_energy_kwh is not None:
+                    over_energy_kwh += over_energy
+            elif over_energy_kwh is not None:
+                over_energy_kwh += 0.0
+
+        remaining_energy = None if base_energy is None else max(0.0, base_energy - over_energy)
+
+        if off_skip_reason is None and _is_offhours(interval.ts, shifts) and running:
+            if offhours_duration_sec is not None:
+                offhours_duration_sec += int(interval.duration_sec)
+            if base_pf_est:
+                off_pf_estimated = True
+            if remaining_energy is not None and offhours_energy_kwh is not None:
+                offhours_energy_kwh += remaining_energy
+            elif running:
+                category_warnings.append(
+                    "OFF_HOURS: Running detected outside shift but energy unavailable for some intervals"
+                )
+        elif thr_idle is not None and state == "idle":
+            idle_duration_sec += int(interval.duration_sec)
+            if remaining_energy is not None:
+                idle_energy_kwh += remaining_energy
+                if duration_h > 0:
+                    idle_kw_samples.append(remaining_energy / duration_h)
+
+    if threshold is not None and idle_duration_sec == 0:
+        idle_status = "not_detected"
+    standby_quality = "high" if idle_kw_samples or idle_status == "not_detected" else "insufficient"
 
     idle_energy_kwh = round(max(0.0, idle_energy_kwh), 6)
     standby_power_kw = round(sum(idle_kw_samples) / len(idle_kw_samples), 6) if idle_kw_samples else 0.0
     standby_energy_kwh = round(idle_energy_kwh, 6) if idle_kw_samples else 0.0
 
+    if offhours_energy_kwh is not None:
+        offhours_energy_kwh = round(max(0.0, offhours_energy_kwh), 6)
+    if over_energy_kwh is not None:
+        over_energy_kwh = round(max(0.0, over_energy_kwh), 6)
+
     idle_cost = round(idle_energy_kwh * tariff_rate, 2) if tariff_rate is not None else None
-    standby_cost = round((standby_energy_kwh or 0.0) * tariff_rate, 2) if tariff_rate is not None and idle_kw_samples else None
+    standby_cost = (
+        round((standby_energy_kwh or 0.0) * tariff_rate, 2)
+        if tariff_rate is not None and idle_kw_samples
+        else None
+    )
     total_cost = round(total_energy_kwh * tariff_rate, 2) if tariff_rate is not None else None
+    offhours_cost = (
+        round((offhours_energy_kwh or 0.0) * tariff_rate, 2)
+        if tariff_rate is not None and offhours_energy_kwh is not None
+        else None
+    )
+    overconsumption_cost = (
+        round((over_energy_kwh or 0.0) * tariff_rate, 2)
+        if tariff_rate is not None and over_energy_kwh is not None
+        else None
+    )
 
-    offhours_energy_kwh = round(max(0.0, offhours_energy_kwh), 6)
-    if not shifts:
-        offhours_energy_out = None
-        offhours_cost = None
-    else:
-        offhours_energy_out = offhours_energy_kwh
-        offhours_cost = round(offhours_energy_kwh * tariff_rate, 2) if tariff_rate is not None else None
+    if off_skip_reason is None and offhours_duration_sec == 0 and offhours_energy_kwh == 0:
+        category_warnings.append("OFF_HOURS: No off-hours consumption detected")
+    if over_skip_reason is None and over_duration_sec == 0 and over_energy_kwh == 0:
+        category_warnings.append("OVERCONSUMPTION: No overconsumption detected in this period")
 
-    warnings = _fmt_warnings(warnings, method_warnings)
+    warnings = _fmt_warnings(warnings, method_warnings + category_warnings)
 
     overall_quality = _overall_quality(energy_quality, idle_quality, standby_quality)
 
@@ -478,8 +394,29 @@ def compute_device_waste(
         standby_cost=standby_cost,
         total_energy_kwh=round(total_energy_kwh, 6),
         total_cost=total_cost,
-        offhours_energy_kwh=offhours_energy_out,
+        offhours_energy_kwh=offhours_energy_kwh,
         offhours_cost=offhours_cost,
+        offhours_duration_sec=offhours_duration_sec,
+        offhours_skipped_reason=off_skip_reason,
+        offhours_pf_estimated=off_pf_estimated,
+        overconsumption_duration_sec=over_duration_sec,
+        overconsumption_energy_kwh=over_energy_kwh,
+        overconsumption_cost=overconsumption_cost,
+        overconsumption_skipped_reason=over_skip_reason,
+        overconsumption_pf_estimated=over_pf_estimated,
+        overconsumption_config_source=("device_override" if overconsumption_threshold is not None else None),
+        overconsumption_config_used=(
+            {"threshold_a": round(float(overconsumption_threshold), 4)}
+            if overconsumption_threshold is not None
+            else None
+        ),
+        unoccupied_duration_sec=None,
+        unoccupied_energy_kwh=None,
+        unoccupied_cost=None,
+        unoccupied_skipped_reason="Disabled by policy",
+        unoccupied_pf_estimated=False,
+        unoccupied_config_source=None,
+        unoccupied_config_used=None,
         data_quality=overall_quality,
         pf_estimated=pf_estimated,
         warnings=warnings,
@@ -500,11 +437,26 @@ def summarize_insights(results: list[DeviceWasteResult], currency: str) -> list[
     if not results:
         return insights
 
-    total_waste_cost = sum(r.idle_cost or 0.0 for r in results)
+    total_waste_cost = sum(
+        (r.idle_cost or 0.0)
+        + (r.offhours_cost or 0.0)
+        + (r.overconsumption_cost or 0.0)
+        for r in results
+    )
     if total_waste_cost > 0:
-        worst = max(results, key=lambda x: x.idle_cost or 0.0)
-        share = ((worst.idle_cost or 0.0) / total_waste_cost) * 100 if total_waste_cost else 0
-        insights.append(f"{worst.device_name} accounts for {share:.0f}% of total idle waste cost")
+        worst = max(
+            results,
+            key=lambda x: (x.idle_cost or 0.0)
+            + (x.offhours_cost or 0.0)
+            + (x.overconsumption_cost or 0.0),
+        )
+        worst_cost = (
+            (worst.idle_cost or 0.0)
+            + (worst.offhours_cost or 0.0)
+            + (worst.overconsumption_cost or 0.0)
+        )
+        share = (worst_cost / total_waste_cost) * 100 if total_waste_cost else 0
+        insights.append(f"{worst.device_name} accounts for {share:.0f}% of total waste cost")
 
     savings_lines = []
     for r in results:
@@ -523,6 +475,10 @@ def summarize_insights(results: list[DeviceWasteResult], currency: str) -> list[
     offhours_total = sum(r.offhours_cost or 0.0 for r in results)
     if offhours_total > 0:
         insights.append(f"Off-hours energy waste in selected period: {currency} {offhours_total:.0f}")
+
+    overcons_total = sum(r.overconsumption_cost or 0.0 for r in results)
+    if overcons_total > 0:
+        insights.append(f"Overconsumption waste in selected period: {currency} {overcons_total:.0f}")
 
     if not insights:
         insights.append("No significant wastage pattern detected for selected scope and date range")

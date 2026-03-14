@@ -43,6 +43,27 @@ class JobWorker:
         self._worker_id = settings.redis_consumer_name or f"worker-{socket.gethostname()}"
         self._worker_heartbeat_task: Optional[asyncio.Task] = None
 
+    @staticmethod
+    def _is_fleet_parent_job(job_row: Any) -> bool:
+        """Fleet parent jobs are orchestrated by API route tasks, not worker queue."""
+        try:
+            if str(getattr(job_row, "device_id", "")) == "ALL":
+                return True
+            params = getattr(job_row, "parameters", None) or {}
+            return bool(params.get("fleet_mode"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_fleet_parent_request(request: AnalyticsRequest) -> bool:
+        try:
+            if str(getattr(request, "device_id", "")) == "ALL":
+                return True
+            params = getattr(request, "parameters", None) or {}
+            return bool(params.get("fleet_mode"))
+        except Exception:
+            return False
+
     async def start(self) -> None:
         """Start the job worker."""
         self._running = True
@@ -94,6 +115,10 @@ class JobWorker:
             )
 
             for job in running_jobs:
+                if self._is_fleet_parent_job(job):
+                    # Parent fleet jobs are monitored by API orchestration path.
+                    continue
+
                 lease = getattr(job, "worker_lease_expires_at", None)
                 if lease is not None and lease.tzinfo is None:
                     lease = lease.replace(tzinfo=timezone.utc)
@@ -181,6 +206,16 @@ class JobWorker:
     async def _process_job(self, job: Job) -> None:
         job_id = job.job_id
         request = job.request
+
+        if self._is_fleet_parent_request(request):
+            self._logger.warning(
+                "fleet_parent_job_received_in_worker_queue_ignored",
+                job_id=job_id,
+                device_id=request.device_id,
+            )
+            if job.receipt:
+                await self._queue.ack_job(job.receipt)
+            return
 
         self._logger.info(
             "processing_job",
@@ -277,6 +312,24 @@ class JobWorker:
                 )
 
     async def _retry_or_fail(self, job: Job, error_code: str, error_message: str) -> None:
+        non_retryable = {
+            "DATASET_NOT_READY_TIMEOUT",
+            "DEVICE_NOT_FOUND",
+            "NO_TELEMETRY_IN_RANGE",
+        }
+        msg_lower = (error_message or "").lower()
+        if "dataset_not_ready_timeout" in msg_lower:
+            error_code = "DATASET_NOT_READY_TIMEOUT"
+        elif "device_not_found" in msg_lower:
+            error_code = "DEVICE_NOT_FOUND"
+        elif "no_telemetry_in_range" in msg_lower:
+            error_code = "NO_TELEMETRY_IN_RANGE"
+
+        if error_code in non_retryable:
+            await self._mark_job_failed(job.job_id, error_message, error_code=error_code)
+            await self._queue.dead_letter(job, error_message)
+            return
+
         if job.attempt < self._max_attempts:
             backoff = min(30, 2 ** (job.attempt - 1))
             await asyncio.sleep(backoff)
@@ -310,11 +363,14 @@ class JobWorker:
                 result_repo = MySQLResultRepository(session)
                 msg = "Job failed"
                 lower = (error_message or "").lower()
-                if "dataset not found" in lower or "no such key" in lower:
-                    msg = (
-                        "No dataset found for selected date range. "
-                        "Please start the device and ensure telemetry is flowing, then retry analysis."
-                    )
+                if "dataset_not_ready_timeout" in lower or "export_timeout" in lower:
+                    msg = "Dataset preparation timed out for selected range. Retry shortly."
+                elif "dataset not found" in lower or "no such key" in lower:
+                    msg = "No exact-range dataset is available for selected date range."
+                elif "device_not_found" in lower:
+                    msg = "Selected device could not be found in export pipeline."
+                elif "no_telemetry_in_range" in lower:
+                    msg = "No telemetry found in selected time range."
                 elif "no numeric columns" in lower or "insufficient" in lower:
                     msg = "Insufficient signal/data for reliable analytics. Please collect more telemetry."
 

@@ -8,6 +8,7 @@ from typing import Optional
 import pandas as pd
 import structlog
 
+from src.config.settings import get_settings
 from src.infrastructure.s3_client import S3Client
 from src.utils.exceptions import DatasetNotFoundError, DatasetReadError
 
@@ -95,7 +96,15 @@ class DatasetService:
                     start_time=start_time,
                     end_time=end_time,
                 )
-                if fallback_key:
+                settings = get_settings()
+                strict_range = bool(
+                    settings.ml_require_exact_dataset_range and settings.app_env.lower() != "test"
+                )
+                allow_fallback = (
+                    not strict_range
+                    or self.dataset_key_covers_range(fallback_key, start_time, end_time)
+                )
+                if fallback_key and allow_fallback:
                     self._logger.warning(
                         "dataset_range_missing_fallback_to_available",
                         device_id=device_id,
@@ -112,6 +121,14 @@ class DatasetService:
                         fallback_key=fallback_key,
                     )
                     return df
+                if fallback_key and not allow_fallback:
+                    self._logger.warning(
+                        "dataset_range_fallback_rejected",
+                        device_id=device_id,
+                        requested_key=s3_key,
+                        fallback_key=fallback_key,
+                        reason="fallback_does_not_cover_requested_range",
+                    )
 
             if not_found:
                 raise DatasetNotFoundError(f"Dataset not found: {s3_key}")
@@ -162,6 +179,20 @@ class DatasetService:
             start_time=start_time,
             end_time=end_time,
         )
+
+    def dataset_key_covers_range(
+        self,
+        key: Optional[str],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> bool:
+        if not key:
+            return False
+        parsed = self._parse_date_window_from_key(key)
+        if not parsed:
+            return False
+        key_start, key_end = parsed
+        return key_start <= start_time.date() and key_end >= end_time.date()
 
     async def _find_best_available_key(
         self,

@@ -184,6 +184,17 @@ export interface FleetFormattedResult {
     maintenance_urgency?: string;
     child_job_id?: string;
   }>;
+  execution_metadata?: {
+    fleet_policy?: string;
+    children_count?: number;
+    devices_ready?: string[];
+    devices_failed?: Array<{ device_id: string; reason?: string; message?: string }>;
+    devices_skipped?: Array<{ device_id: string; reason?: string; message?: string }>;
+    skipped_reasons?: Record<string, string>;
+    coverage_pct?: number;
+    selected_device_count?: number;
+    reason?: string;
+  };
 }
 
 export interface SupportedModelsResponse {
@@ -210,7 +221,15 @@ export async function runAnalytics(payload: RunAnalyticsRequest) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    try {
+      const detail = await res.json();
+      const msg = detail?.detail?.message || detail?.message || detail?.detail || `HTTP ${res.status}`;
+      throw new Error(String(msg));
+    } catch {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  }
   return res.json() as Promise<{ job_id: string; status: string; message: string }>;
 }
 
@@ -221,8 +240,14 @@ export async function runFleetAnalytics(payload: RunFleetAnalyticsRequest) {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+    try {
+      const detail = await res.json();
+      const msg = detail?.detail?.message || detail?.message || detail?.detail || `HTTP ${res.status}`;
+      throw new Error(String(msg));
+    } catch {
+      const text = await res.text();
+      throw new Error(text || `HTTP ${res.status}`);
+    }
   }
   return res.json() as Promise<{ job_id: string; status: string; message: string }>;
 }

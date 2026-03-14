@@ -104,8 +104,15 @@ class ResultFormatter:
         recommendations = self._anomaly_recommendations(anomaly_rate, parameter_breakdown)
 
         points_for_conf = int((metadata or {}).get("data_points_analyzed", total_points))
-        confidence = get_confidence(points_for_conf, sensitivity).to_dict()
-        days_analyzed = float((metadata or {}).get("days_available", lookback_days))
+        days_analyzed = self._resolve_days_available(
+            provided_days=(metadata or {}).get("days_available"),
+            data_points=points_for_conf,
+        )
+        confidence = self._confidence_from_days(days_analyzed, sensitivity)
+        normalized_quality_flags = self._normalize_data_confidence_flags(
+            data_quality_flags or [],
+            confidence,
+        )
         gauge_color = "green" if anomaly_rate < 3.0 else "amber" if anomaly_rate < 7.0 else "red"
         ensemble_data = ensemble or {}
         timeline_vote = (ensemble_data.get("timeline") or {}).get("vote_count") or []
@@ -135,6 +142,9 @@ class ResultFormatter:
             "analysis_type": "anomaly_detection",
             "device_id": device_id,
             "job_id": job_id,
+            "days_available": round(days_analyzed, 1),
+            "hours_available": round(days_analyzed * 24, 1),
+            "confidence_badge": confidence,
             "health_score": health_score,
             "confidence": {
                 "level": confidence["level"],
@@ -169,6 +179,13 @@ class ResultFormatter:
                 "parameters_analyzed": len(parameter_breakdown),
                 "fallback_mode": bool((metadata or {}).get("fallback_mode", False)),
             },
+            "execution_metadata": {
+                "data_window": {
+                    "requested_range": (metadata or {}).get("requested_range"),
+                    "dataset_range": (metadata or {}).get("dataset_range"),
+                    "points_analyzed": total_points,
+                }
+            },
             "ensemble": {
                 "vote_count": summary_vote_count,
                 "confidence": summary_confidence,
@@ -194,7 +211,7 @@ class ResultFormatter:
                 "timeline": ensemble_data.get("timeline", {}),
             },
             "reasoning": reasoning or {},
-            "data_quality_flags": data_quality_flags or [],
+            "data_quality_flags": normalized_quality_flags,
         }
 
     def format_failure_prediction_results(
@@ -261,18 +278,33 @@ class ResultFormatter:
             critical_pct = round(critical_pct / total * 100, 1)
 
         points_for_conf = int((metadata or {}).get("data_points_analyzed", max(1, int(days_available * 1440))))
-        confidence = get_confidence(points_for_conf, str((metadata or {}).get("sensitivity", "medium"))).to_dict()
+        normalized_days = self._resolve_days_available(
+            provided_days=days_available,
+            data_points=points_for_conf,
+        )
+        confidence = self._confidence_from_days(
+            normalized_days,
+            str((metadata or {}).get("sensitivity", "medium")),
+        )
+        normalized_quality_flags = self._normalize_data_confidence_flags(
+            data_quality_flags or [],
+            confidence,
+        )
         return {
             "analysis_type": "failure_prediction",
             "device_id": device_id,
             "job_id": job_id,
+            "days_available": round(normalized_days, 1),
+            "hours_available": round(normalized_days * 24, 1),
+            "confidence_badge": confidence,
             "health_score": health_score,
             "confidence": {
-                "level": model_confidence or confidence["level"],
+                "level": confidence["level"],
                 "badge_color": confidence["badge_color"],
                 "banner_text": confidence["banner_text"],
                 "banner_style": confidence["banner_style"],
-                "days_available": round(days_available, 1),
+                "days_available": round(normalized_days, 1),
+                "model_agreement_confidence": model_confidence,
             },
             "summary": {
                 "failure_risk": risk_level,
@@ -281,8 +313,9 @@ class ResultFormatter:
                 "safe_probability_pct": round(100.0 - prob, 1),
                 "estimated_remaining_life": remaining_life,
                 "maintenance_urgency": urgency,
-                "confidence_level": model_confidence or confidence["level"],
-                "days_analyzed": round(days_available, 1),
+                "confidence_level": confidence["level"],
+                "model_agreement_confidence": model_confidence,
+                "days_analyzed": round(normalized_days, 1),
             },
             "risk_breakdown": {
                 "safe_pct": safe_pct,
@@ -294,17 +327,76 @@ class ResultFormatter:
             "recommended_actions": recs,
             "metadata": {
                 "model_confidence": model_confidence or confidence["level"],
-                "days_analyzed": round(days_available, 1),
+                "days_analyzed": round(normalized_days, 1),
                 "data_completeness_pct": float((metadata or {}).get("data_completeness_pct", 100.0)),
                 "fallback_mode": bool((metadata or {}).get("fallback_mode", False)),
                 "insufficient_trend_signal": insufficient_trend_signal,
+            },
+            "execution_metadata": {
+                "data_window": {
+                    "requested_range": (metadata or {}).get("requested_range"),
+                    "dataset_range": (metadata or {}).get("dataset_range"),
+                    "points_analyzed": int((metadata or {}).get("data_points_analyzed", 0)),
+                }
             },
             "ensemble": ensemble or {},
             "time_to_failure": time_to_failure or {},
             "reasoning": reasoning or {},
             "degradation_series": degradation_series or [],
-            "data_quality_flags": data_quality_flags or [],
+            "data_quality_flags": normalized_quality_flags,
         }
+
+    @staticmethod
+    def _resolve_days_available(provided_days: Any, data_points: int) -> float:
+        try:
+            if provided_days is not None and float(provided_days) > 0:
+                return float(provided_days)
+        except Exception:
+            pass
+        return round(max(1, int(data_points)) / 1440.0, 3)
+
+    @staticmethod
+    def _confidence_from_days(days_available: float, sensitivity: str) -> Dict[str, Any]:
+        confidence = get_confidence(max(1, int(days_available * 1440)), sensitivity).to_dict()
+        confidence["days_available"] = round(float(days_available), 1)
+        return confidence
+
+    @staticmethod
+    def _normalize_data_confidence_flags(
+        flags: List[Dict[str, Any]],
+        confidence: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        style = str(confidence.get("banner_style", "blue")).lower()
+        color_map = {
+            "red": "red",
+            "orange": "orange",
+            "amber": "orange",
+            "yellow": "yellow",
+            "blue": "blue",
+            "green": "green",
+        }
+        color = color_map.get(style, "blue")
+        severity = "warning" if color in {"red", "orange"} else "info"
+        canonical = {
+            "type": "data_confidence",
+            "confidence_level": confidence.get("level", "Low"),
+            "color": color,
+            "message": confidence.get("banner_text", ""),
+            "severity": severity,
+        }
+
+        out: List[Dict[str, Any]] = []
+        replaced = False
+        for flag in flags:
+            if str(flag.get("type")) == "data_confidence":
+                if not replaced:
+                    out.append(canonical)
+                    replaced = True
+                continue
+            out.append(flag)
+        if not replaced:
+            out.insert(0, canonical)
+        return out
 
     def format_fleet_results(
         self,
